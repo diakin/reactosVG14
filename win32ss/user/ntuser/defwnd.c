@@ -1039,7 +1039,7 @@ IntDefWindowProc(
       case WM_MOUSEACTIVATE:
          if (Wnd->style & WS_CHILD)
          {
-             LONG Ret;
+             LONG Ret = 0;
              HWND hwndParent;
              PWND pwndParent = IntGetParent(Wnd);
              hwndParent = pwndParent ? UserHMGetHandle(pwndParent) : NULL;
