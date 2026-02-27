@@ -1,0 +1,98 @@
+================================================================================
+  Actionable Copilot Prompt — Compile ReactOS into a Bootable ISO
+================================================================================
+
+Copy the entire block below and paste it into GitHub Copilot Chat inside
+Visual Studio Code. Copilot will follow the referenced instruction file and
+walk you through every step needed to produce a working bootcd.iso.
+
+================================================================================
+BEGIN PROMPT — COPY FROM HERE
+================================================================================
+
+@workspace You are an expert build engineer. Your task is to compile this
+ReactOS repository into a fully working bootable ISO file (bootcd.iso) on
+this Windows 10 machine, following the instructions in
+COPILOT_BUILD_INSTRUCTIONS.txt at the repository root.
+
+Do the following, one step at a time, and report progress after each step:
+
+1. READ the file COPILOT_BUILD_INSTRUCTIONS.txt in this repository.
+   Confirm that you understand both Method A (RosBE) and Method B (MSVC).
+
+2. DETECT which build tools are already available on this machine.
+   Run these checks in the integrated terminal:
+     git --version
+     cmake --version
+     ninja --version
+   Also check whether the RosBE environment variable ROS_ARCH is set
+   (indicating a RosBE prompt) or whether VCINSTALLDIR is set (indicating
+   a Visual Studio Developer Command Prompt).
+
+3. SELECT the build method:
+   - If ROS_ARCH is set          → use Method A (RosBE).
+   - If VCINSTALLDIR is set      → use Method B (MSVC).
+   - If neither is set           → tell me which tools are missing and
+     print the exact download URLs from COPILOT_BUILD_INSTRUCTIONS.txt so
+     I can install them, then wait for me to confirm before continuing.
+
+4. VALIDATE the source path.
+   Make sure the repository path contains no spaces. If it does, stop and
+   tell me to move it.
+
+5. CREATE the build directory.
+   Run:
+     mkdir build
+     cd build
+
+6. CONFIGURE the build.
+   Run the appropriate configure command from COPILOT_BUILD_INSTRUCTIONS.txt
+   for the detected method (A or B). Use architecture i386 unless I
+   explicitly ask for amd64.
+
+7. BUILD all modules.
+   Run the full build command from the instructions. This may take 30–90
+   minutes. Stream the terminal output so I can watch for errors.
+
+8. BUILD the bootable ISO.
+   Run the bootcd target command from the instructions.
+
+9. VERIFY the ISO.
+   Confirm that bootcd.iso exists in the build directory and print its
+   file size.
+
+10. PRINT a summary that includes:
+    - Build method used (A or B)
+    - Architecture (i386 or amd64)
+    - Full path to bootcd.iso
+    - File size of bootcd.iso
+    - Suggested next step: how to boot the ISO in VirtualBox or QEMU
+      (use the VM settings from COPILOT_BUILD_INSTRUCTIONS.txt)
+
+IMPORTANT RULES:
+- Always reference COPILOT_BUILD_INSTRUCTIONS.txt for exact commands —
+  do not improvise or guess commands.
+- If any step fails, show me the full error output, diagnose the cause
+  using the Troubleshooting section of COPILOT_BUILD_INSTRUCTIONS.txt,
+  and suggest the fix before retrying.
+- Do not skip steps or combine them. Execute each step sequentially and
+  confirm success before moving to the next.
+- If you need me to install software or take a manual action, pause and
+  give me clear instructions with download URLs, then wait for my go-ahead.
+
+================================================================================
+END PROMPT — COPY TO HERE
+================================================================================
+
+NOTES FOR THE USER
+------------------
+* Open VSCode in the root of this repository before pasting the prompt.
+* The prompt uses @workspace so Copilot can read COPILOT_BUILD_INSTRUCTIONS.txt.
+* If you are already inside a RosBE prompt or a VS Developer Command Prompt,
+  open VSCode from that same terminal so the environment variables carry over:
+    code .
+* The build takes 30–90 minutes depending on your hardware. Do not close the
+  terminal while it is running.
+* After obtaining bootcd.iso you can boot it in VirtualBox, QEMU, or burn it
+  to a physical CD to install ReactOS on real hardware.
+================================================================================

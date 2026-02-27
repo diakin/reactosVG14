@@ -1,0 +1,269 @@
+================================================================================
+  ReactOS Build Instructions for GitHub Copilot in VSCode on Windows 10
+================================================================================
+
+PURPOSE
+-------
+This document provides a complete, step-by-step algorithm for GitHub Copilot
+(running inside Visual Studio Code on Windows 10) to compile this ReactOS
+repository into a fully working bootable ISO file (bootcd.iso).
+
+Two build methods are covered below. Method A (RosBE) is the recommended
+approach and works with the fewest manual prerequisites. Method B (MSVC)
+uses the Microsoft Visual C++ toolchain already present on many developer
+machines. Follow whichever method matches the tools installed on the host.
+
+================================================================================
+COMMON PREREQUISITES (both methods)
+================================================================================
+
+1. Windows 10 (x64) with at least 10 GB of free disk space.
+2. Git for Windows  — https://git-scm.com/download/win
+   Verify: open a terminal and run  git --version
+3. The ReactOS source tree must be cloned to a path that contains NO SPACES.
+   Good : C:\reactos
+   Bad  : C:\My Projects\reactos
+4. CMake 3.2.1 or later — https://cmake.org/download/
+   Verify: cmake --version
+5. (Optional but recommended) A virtual machine application to test the ISO:
+   - VirtualBox  — https://www.virtualbox.org/
+   - QEMU        — https://www.qemu.org/
+
+================================================================================
+METHOD A — Build with ReactOS Build Environment (RosBE)  [RECOMMENDED]
+================================================================================
+
+ADDITIONAL PREREQUISITES
+  * RosBE for Windows 2.2.0 — download the installer from:
+    https://sourceforge.net/projects/reactos/files/RosBE-Windows/i386/2.2.0/
+    Install to the default path (e.g. C:\RosBE).
+
+STEP-BY-STEP ALGORITHM
+-----------------------
+
+A-1.  OPEN THE ROSBE COMMAND PROMPT
+      Launch "ReactOS Build Environment 2.2.0" from the Start Menu.
+      This opens a special command prompt with the GCC cross-compiler,
+      CMake, Ninja, and all required tools already on PATH.
+
+A-2.  NAVIGATE TO THE SOURCE DIRECTORY
+      cd /d C:\reactos
+      (Replace C:\reactos with the actual clone path — no spaces allowed.)
+
+A-3.  CREATE AND ENTER THE BUILD DIRECTORY
+      mkdir build
+      cd build
+
+A-4.  CONFIGURE THE BUILD
+      Run the configure script that ships with the source tree:
+
+        ..\configure.cmd
+
+      This auto-detects RosBE, selects the Ninja generator, sets the GCC
+      toolchain file, and targets the i386 architecture.
+      Wait until you see "Configure script complete!".
+
+      OPTIONAL FLAGS (append after configure.cmd):
+        -DENABLE_ROSTESTS=1    include the test suite
+        -DENABLE_ROSAPPS=1     include community applications
+
+A-5.  BUILD ALL MODULES
+      ninja
+
+      This compiles every ReactOS component. On a modern quad-core machine
+      expect 30–90 minutes for a clean build. If the build fails, read the
+      error output carefully — the most common cause is a missing tool or
+      a path with spaces.
+
+A-6.  BUILD THE BOOTABLE CD ISO
+      ninja bootcd
+
+      On success this creates the file:
+        C:\reactos\build\bootcd.iso
+
+A-7.  (OPTIONAL) BUILD THE LIVE CD ISO
+      ninja livecd
+
+      Creates:
+        C:\reactos\build\livecd.iso
+
+A-8.  VERIFY THE ISO
+      Check that the file exists and is larger than 100 MB:
+        dir bootcd.iso
+
+A-9.  TEST IN A VIRTUAL MACHINE
+      Create a new VM in VirtualBox or QEMU:
+        - Type : Other / Unknown (32-bit) or Windows XP (32-bit)
+        - RAM  : 512 MB minimum, 1024 MB recommended
+        - Disk : 2 GB+, VDI/QCOW2
+      Attach bootcd.iso as the CD/DVD drive, boot, and follow the ReactOS
+      installer.
+
+COMPLETE COMMAND SEQUENCE (copy-paste into a RosBE prompt):
+-----------------------------------------------------------
+  cd /d C:\reactos
+  mkdir build
+  cd build
+  ..\configure.cmd
+  ninja
+  ninja bootcd
+  dir bootcd.iso
+
+
+================================================================================
+METHOD B — Build with Microsoft Visual C++ (MSVC)
+================================================================================
+
+ADDITIONAL PREREQUISITES
+  * Visual Studio 2019 or 2022 with the "Desktop development with C++"
+    workload installed (includes MSVC compiler, linker, and libs).
+  * Ninja build system:
+      choco install ninja -y          (if Chocolatey is available)
+    OR download from https://github.com/ninja-build/ninja/releases and put
+    ninja.exe somewhere on PATH.
+  * Flex and Bison (win_flex / win_bison):
+      Download from:
+        https://svn.reactos.org/storage/vperevertkin/flexbison.7z
+      Extract to a folder (e.g. C:\tools\flexbison) and add it to PATH.
+      Then set environment variables:
+        set BISON_PKGDATADIR=C:\tools\flexbison\share\bison
+        set M4=C:\tools\flexbison\m4.exe
+
+STEP-BY-STEP ALGORITHM
+-----------------------
+
+B-1.  OPEN A DEVELOPER COMMAND PROMPT
+      From the Start Menu open:
+        "x86 Native Tools Command Prompt for VS 2019"   (for 32-bit build)
+      or
+        "x64 Native Tools Command Prompt for VS 2019"   (for 64-bit build)
+      This sets VCINSTALLDIR, cl.exe, link.exe, and related vars.
+
+B-2.  ENSURE NINJA, FLEX, AND BISON ARE ON PATH
+      ninja --version
+      win_flex --version
+      win_bison --version
+      If any of these fail, add their directories to PATH.
+
+B-3.  NAVIGATE TO THE SOURCE DIRECTORY
+      cd /d C:\reactos
+
+B-4.  CREATE AND ENTER THE BUILD DIRECTORY
+      mkdir build
+      cd build
+
+B-5.  CONFIGURE WITH CMAKE
+      For a 32-bit (i386) build:
+        cmake -G Ninja ^
+              -DCMAKE_TOOLCHAIN_FILE:FILEPATH=toolchain-msvc.cmake ^
+              -DARCH:STRING=i386 ^
+              ..\
+
+      For a 64-bit (amd64) build:
+        cmake -G Ninja ^
+              -DCMAKE_TOOLCHAIN_FILE:FILEPATH=toolchain-msvc.cmake ^
+              -DARCH:STRING=amd64 ^
+              ..\
+
+      Wait until CMake finishes without errors.
+
+B-6.  BUILD ALL MODULES
+      cmake --build .
+
+B-7.  BUILD THE BOOTABLE CD ISO
+      cmake --build . --target bootcd
+
+      Creates:
+        C:\reactos\build\bootcd.iso
+
+B-8.  (OPTIONAL) BUILD THE LIVE CD ISO
+      cmake --build . --target livecd
+
+B-9.  VERIFY AND TEST
+      Same as steps A-8 and A-9 above.
+
+COMPLETE COMMAND SEQUENCE (copy-paste into a VS Developer Prompt):
+------------------------------------------------------------------
+  cd /d C:\reactos
+  mkdir build
+  cd build
+  cmake -G Ninja -DCMAKE_TOOLCHAIN_FILE:FILEPATH=toolchain-msvc.cmake -DARCH:STRING=i386 ..\
+  cmake --build .
+  cmake --build . --target bootcd
+  dir bootcd.iso
+
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+PROBLEM: "cmake" is not recognized
+FIX   : Install CMake and make sure cmake.exe is on your system PATH.
+
+PROBLEM: "ninja" is not recognized
+FIX   : Install Ninja (choco install ninja -y) or download and add to PATH.
+
+PROBLEM: Build fails with "flex" or "bison" not found (MSVC method)
+FIX   : Download flexbison.7z from the URL above, extract, and add to PATH.
+         Also set BISON_PKGDATADIR and M4 environment variables.
+
+PROBLEM: "Your source path contains at least one space"
+FIX   : Move or rename the source directory so the full path has no spaces.
+
+PROBLEM: Build runs out of memory or is very slow
+FIX   : Close other applications. ReactOS builds are memory-intensive.
+         At least 4 GB of RAM is recommended; 8 GB+ is ideal.
+
+PROBLEM: ISO file is missing after the build completes
+FIX   : Check the terminal output for errors during the "ninja bootcd"
+         or "cmake --build . --target bootcd" step.
+
+PROBLEM: ReactOS does not boot in the VM
+FIX   : Ensure the VM type is set to 32-bit (i386 build) or 64-bit
+         (amd64 build). Allocate at least 512 MB RAM and 2 GB disk.
+
+================================================================================
+CLEAN / REBUILD
+================================================================================
+
+To do a clean build, delete the build directory and repeat from the
+configure step:
+
+  cd /d C:\reactos
+  rmdir /s /q build
+  mkdir build
+  cd build
+  (then configure and build again)
+
+================================================================================
+KEY FILES PRODUCED
+================================================================================
+
+  build/bootcd.iso   — Bootable installer CD image
+  build/livecd.iso   — Live CD image (runs ReactOS without installing)
+
+================================================================================
+REFERENCE LINKS
+================================================================================
+
+  ReactOS Wiki — Building ReactOS:
+    https://reactos.org/wiki/Building_ReactOS
+
+  ReactOS Build Environment download:
+    https://reactos.org/wiki/Build_Environment
+
+  RosBE for Windows 2.2.0:
+    https://sourceforge.net/projects/reactos/files/RosBE-Windows/i386/2.2.0/
+
+  CMake download:
+    https://cmake.org/download/
+
+  Ninja download:
+    https://github.com/ninja-build/ninja/releases
+
+  Flex/Bison for Windows:
+    https://svn.reactos.org/storage/vperevertkin/flexbison.7z
+
+================================================================================
+END OF INSTRUCTIONS
+================================================================================
