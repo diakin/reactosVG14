@@ -1532,7 +1532,7 @@ IopSetDeviceSecurityDescriptor(IN PDEVICE_OBJECT DeviceObject,
                                IN POOL_TYPE PoolType,
                                IN PGENERIC_MAPPING GenericMapping)
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
     PSECURITY_DESCRIPTOR OldSecurityDescriptor, CachedSecurityDescriptor, NewSecurityDescriptor;
 
     PAGED_CODE();

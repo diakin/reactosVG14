@@ -3233,7 +3233,7 @@ SetupDeviceInstance(
 {
     PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA ControlData;
     HKEY hDeviceKey = NULL;
-    DWORD dwDisableCount, dwSize;
+    DWORD dwDisableCount = 0, dwSize;
     DWORD ulStatus, ulProblem;
     DWORD dwError;
     CONFIGRET ret = CR_SUCCESS;
@@ -3319,7 +3319,7 @@ EnableDeviceInstance(
 {
     HKEY hControlKey = NULL;
     WCHAR szControl[260];
-    DWORD dwDisableCount, dwSize;
+    DWORD dwDisableCount = 0, dwSize;
     DWORD ulStatus, ulProblem;
     DWORD dwError;
     CONFIGRET ret = CR_SUCCESS;

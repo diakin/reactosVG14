@@ -656,7 +656,7 @@ IopGetRelatedTargetDevice(
 {
     NTSTATUS Status;
     IO_STACK_LOCATION Stack = {0};
-    PDEVICE_RELATIONS DeviceRelations;
+    PDEVICE_RELATIONS DeviceRelations = NULL;
     PDEVICE_OBJECT DeviceObject = NULL;
 
     ASSERT(FileObject);

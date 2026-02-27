@@ -121,7 +121,7 @@ ObSetSecurityDescriptorInfo(IN PVOID Object,
                             IN POOL_TYPE PoolType,
                             IN PGENERIC_MAPPING GenericMapping)
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_SUCCESS;
     POBJECT_HEADER ObjectHeader;
     PSECURITY_DESCRIPTOR OldDescriptor, NewDescriptor, CachedDescriptor;
     PEX_FAST_REF FastRef;
