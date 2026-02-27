@@ -119,7 +119,7 @@ ADDITIONAL PREREQUISITES
     workload installed (includes MSVC compiler, linker, and libs).
   * Ninja build system:
       choco install ninja -y          (if Chocolatey is available)
-    OR download from https://github.com/nicknisi/ninja/releases and put
+    OR download from https://github.com/ninja-build/ninja/releases and put
     ninja.exe somewhere on PATH.
   * Flex and Bison (win_flex / win_bison):
       Download from:
@@ -259,7 +259,7 @@ REFERENCE LINKS
     https://cmake.org/download/
 
   Ninja download:
-    https://github.com/nicknisi/ninja/releases
+    https://github.com/ninja-build/ninja/releases
 
   Flex/Bison for Windows:
     https://svn.reactos.org/storage/vperevertkin/flexbison.7z
