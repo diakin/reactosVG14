@@ -458,7 +458,7 @@ _main(IN INT argc,
     PVOID State;
     ULONG Flags;
     PROCESS_BASIC_INFORMATION ProcessInfo;
-    UNICODE_STRING DbgString = { 0, 0, NULL }, InitialCommand;
+    UNICODE_STRING DbgString = { 0, 0, NULL }, InitialCommand = { 0, 0, NULL };
 
     /* Make us critical */
     RtlSetProcessIsCritical(TRUE, NULL, FALSE);
