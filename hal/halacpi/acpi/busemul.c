@@ -100,10 +100,10 @@ HalacpiIrqTranslateResourcesIsa(
 
     Target->u.Interrupt.Vector = Vector;
 
-    if (!Target->u.Interrupt.Level == 9 || AlternativesCount <= 0)
+    /* Only IRQ 9 with alternatives may be moved to IRQ 2 (cascade) below */
+    if (Target->u.Interrupt.Level != 9 || AlternativesCount == 0)
     {
         DPRINT("HalacpiIrqTranslateResourcesIsa: Level %X, Vector %X\n", Target->u.Interrupt.Level, Target->u.Interrupt.Vector);
-        ASSERT(FALSE);
         return STATUS_SUCCESS;
     }
 
