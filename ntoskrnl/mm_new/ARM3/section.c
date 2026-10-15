@@ -6703,7 +6703,7 @@ MiAddViewsForSection(
             {
                 OldIrql = MiLockPfnDb(APC_LEVEL);
 
-                while (StartMappedSubsection != MappedSubsection);
+                while (StartMappedSubsection != MappedSubsection)
                 {
                     ASSERT((LONG_PTR)StartMappedSubsection->NumberOfMappedViews >= 1);
                     StartMappedSubsection->NumberOfMappedViews--;
@@ -7456,7 +7456,7 @@ MiAppendSubsectionChain(
     if (LastSubsection->ControlArea->NumberOfUserReferences)
         goto Finish;
 
-    while (NewSubsection);
+    while (NewSubsection)
     {
         ASSERT(NewSubsection->u.SubsectionFlags.SubsectionStatic == 1);
 
