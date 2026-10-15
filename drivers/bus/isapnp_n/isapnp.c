@@ -1789,6 +1789,7 @@ PiQueryCapabilitiesPdo(
     _In_ PIRP Irp)
 {
     PDEVICE_CAPABILITIES Capabilities;
+    ULONG StateIndex;
 
     DPRINT("PiQueryCapabilitiesPdo: %p, %p\n", DeviceObject, Irp);
 
@@ -1802,7 +1803,10 @@ PiQueryCapabilitiesPdo(
     Capabilities->DockDevice = 0;
     Capabilities->UniqueID = 1;
 
-    RtlFillMemory(Capabilities->DeviceState, 7, PowerDeviceD3);
+    for (StateIndex = 0; StateIndex < PowerSystemMaximum; StateIndex++)
+    {
+        Capabilities->DeviceState[StateIndex] = PowerDeviceD3;
+    }
 
     Capabilities->DeviceState[PowerSystemWorking] = PowerDeviceD0;
 
