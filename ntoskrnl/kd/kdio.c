@@ -26,6 +26,11 @@
 /* GLOBALS *******************************************************************/
 
 #define KdpBufferSize  (1024 * 512)
+/* Static buffer for messages printed in BootPhase 0, before the pool is
+ * available. Its contents are moved into the pool buffer in BootPhase 1. */
+#define KdpEarlyBufferSize  (1024 * 64)
+static CHAR KdpEarlyBuffer[KdpEarlyBufferSize];
+static ULONG KdpDebugBufferSize = 0;
 static BOOLEAN KdpLoggingEnabled = FALSE;
 static PCHAR KdpDebugBuffer = NULL;
 static volatile ULONG KdpCurrentPosition = 0;
@@ -133,8 +138,8 @@ KdpLoggerThread(PVOID Context)
         num = KdpFreeBytes;
 
         /* Now securely calculate values, based on local variables */
-        beg = (end + num) % KdpBufferSize;
-        num = KdpBufferSize - num;
+        beg = (end + num) % KdpDebugBufferSize;
+        num = KdpDebugBufferSize - num;
 
         /* Nothing to do? */
         if (num == 0)
@@ -148,7 +153,7 @@ KdpLoggerThread(PVOID Context)
         else
         {
             NtWriteFile(KdpLogFileHandle, NULL, NULL, NULL, &Iosb,
-                        KdpDebugBuffer + beg, KdpBufferSize - beg, NULL, NULL);
+                        KdpDebugBuffer + beg, KdpDebugBufferSize - beg, NULL, NULL);
 
             NtWriteFile(KdpLogFileHandle, NULL, NULL, NULL, &Iosb,
                         KdpDebugBuffer, end, NULL, NULL);
@@ -176,7 +181,7 @@ KdpPrintToLogFile(
     num = min(Length, KdpFreeBytes);
     if (num != 0)
     {
-        end = (beg + num) % KdpBufferSize;
+        end = (beg + num) % KdpDebugBufferSize;
         KdpCurrentPosition = end;
         KdpFreeBytes -= num;
 
@@ -186,8 +191,8 @@ KdpPrintToLogFile(
         }
         else
         {
-            RtlCopyMemory(KdpDebugBuffer + beg, String, KdpBufferSize - beg);
-            RtlCopyMemory(KdpDebugBuffer, String + KdpBufferSize - beg, end);
+            RtlCopyMemory(KdpDebugBuffer + beg, String, KdpDebugBufferSize - beg);
+            RtlCopyMemory(KdpDebugBuffer, String + KdpDebugBufferSize - beg, end);
         }
     }
 
@@ -212,29 +217,62 @@ KdpDebugLogInit(
 
     if (BootPhase == 0)
     {
+        static const CHAR BootMarker[] =
+            "\r\n===== Boot: ReactOS " KERNEL_VERSION_STR
+            " (Build " KERNEL_VERSION_BUILD_STR ") =====\r\n";
+
+        /* Initialize spinlock */
+        KeInitializeSpinLock(&KdpDebugLogSpinLock);
+
+        /* Use the static buffer until the pool is available */
+        KdpDebugBuffer = KdpEarlyBuffer;
+        KdpDebugBufferSize = KdpEarlyBufferSize;
+        KdpCurrentPosition = 0;
+        KdpFreeBytes = KdpEarlyBufferSize;
+
         /* Write out the functions that we support for now */
         DispatchTable->KdpPrintRoutine = KdpPrintToLogFile;
 
         /* Register for BootPhase 1 initialization and as a Provider */
         DispatchTable->KdpInitRoutine = KdpDebugLogInit;
         InsertTailList(&KdProviders, &DispatchTable->KdProvidersList);
+
+        /* Separate this boot from the previous ones in the log file */
+        KdpPrintToLogFile(BootMarker, sizeof(BootMarker) - 1);
     }
     else if (BootPhase == 1)
     {
-        /* Allocate a buffer for debug log */
-        KdpDebugBuffer = ExAllocatePoolZero(NonPagedPool,
-                                            KdpBufferSize,
-                                            TAG_KDBG);
-        if (!KdpDebugBuffer)
-        {
-            KdpDebugMode.File = FALSE;
-            RemoveEntryList(&DispatchTable->KdProvidersList);
-            return STATUS_NO_MEMORY;
-        }
-        KdpFreeBytes = KdpBufferSize;
+        PCHAR PoolBuffer;
+        KIRQL OldIrql;
+        ULONG UsedBytes;
 
-        /* Initialize spinlock */
-        KeInitializeSpinLock(&KdpDebugLogSpinLock);
+        /* Allocate a buffer for debug log */
+        PoolBuffer = ExAllocatePoolZero(NonPagedPool,
+                                        KdpBufferSize,
+                                        TAG_KDBG);
+        if (PoolBuffer)
+        {
+            /* Move the BootPhase 0 messages into the pool buffer.
+             * The logger thread is not started yet, so the early
+             * buffer has not wrapped: its data begins at offset 0. */
+            OldIrql = KdbpAcquireLock(&KdpDebugLogSpinLock);
+
+            UsedBytes = KdpDebugBufferSize - KdpFreeBytes;
+            RtlCopyMemory(PoolBuffer, KdpDebugBuffer, UsedBytes);
+
+            KdpDebugBuffer = PoolBuffer;
+            KdpDebugBufferSize = KdpBufferSize;
+            KdpCurrentPosition = UsedBytes;
+            KdpFreeBytes = KdpBufferSize - UsedBytes;
+
+            KdbpReleaseLock(&KdpDebugLogSpinLock, OldIrql);
+        }
+        else
+        {
+            /* Keep logging into the static buffer */
+            DPRINT1("Failed to allocate the debug log buffer, using %lu bytes\n",
+                    KdpDebugBufferSize);
+        }
 
         /* Register for later BootPhase 2 reinitialization */
         DispatchTable->KdpInitRoutine = KdpDebugLogInit;
@@ -356,7 +394,8 @@ KdpDebugLogInit(
 
 Failure:
         KdpFreeBytes = 0;
-        ExFreePoolWithTag(KdpDebugBuffer, TAG_KDBG);
+        if (KdpDebugBuffer != KdpEarlyBuffer)
+            ExFreePoolWithTag(KdpDebugBuffer, TAG_KDBG);
         KdpDebugBuffer = NULL;
         KdpDebugMode.File = FALSE;
         RemoveEntryList(&DispatchTable->KdProvidersList);
