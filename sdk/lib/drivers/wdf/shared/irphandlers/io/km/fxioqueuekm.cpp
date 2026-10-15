@@ -514,7 +514,7 @@ Routine Description:
   #ifndef __REACTOS__
     *m_FwdProgContext = {};
   #else
-    RtlZeroMemory(m_FwdProgContext, sizeof(*m_FwdProgContext));
+    RtlZeroMemory((PVOID)m_FwdProgContext, sizeof(*m_FwdProgContext));
   #endif
 
     //
