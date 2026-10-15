@@ -805,6 +805,80 @@ PcDiskReadLogicalSectors(
     }
 }
 
+/*
+ * Writes sectors with the INT 13h extensions (LBA mode only).
+ * Used to save the kernel RAM debug log (see pcramlog.c).
+ */
+BOOLEAN
+PcDiskWriteLogicalSectors(
+    IN UCHAR DriveNumber,
+    IN ULONGLONG SectorNumber,
+    IN ULONG SectorCount,
+    IN PVOID Buffer)
+{
+    PPC_DISK_DRIVE DiskDrive;
+    ULONG RetryCount;
+    PI386_DISK_ADDRESS_PACKET Packet = (PI386_DISK_ADDRESS_PACKET)(BIOSCALLBUFFER);
+    REGS RegsIn = {{0}};
+    REGS RegsOut = {{0}};
+
+    TRACE("PcDiskWriteLogicalSectors() DriveNumber: 0x%x SectorNumber: %I64d SectorCount: %d Buffer: 0x%x\n",
+          DriveNumber, SectorNumber, SectorCount, Buffer);
+
+    /* 16-bit BIOS addressing limitation */
+    ASSERT(((ULONG_PTR)Buffer) <= 0xFFFFF);
+
+    DiskDrive = PcDiskDriveNumberToDrive(DriveNumber);
+    if (!DiskDrive)
+        return FALSE;
+
+    if ((DriveNumber < 0x80) || !DiskDrive->Int13ExtensionsSupported)
+    {
+        ERR("PcDiskWriteLogicalSectors(): drive 0x%x has no INT 13h extensions\n", DriveNumber);
+        return FALSE;
+    }
+
+    /* Setup disk address packet */
+    RtlZeroMemory(Packet, sizeof(*Packet));
+    Packet->PacketSize = sizeof(*Packet);
+    Packet->Reserved = 0;
+    Packet->LBABlockCount = (USHORT)SectorCount;
+    ASSERT(Packet->LBABlockCount == SectorCount);
+    Packet->TransferBufferOffset = ((ULONG_PTR)Buffer) & 0x0F;
+    Packet->TransferBufferSegment = (USHORT)(((ULONG_PTR)Buffer) >> 4);
+    Packet->LBAStartBlock = SectorNumber;
+
+    /*
+     * BIOS int 0x13, function 43h - IBM/MS INT 13 Extensions - EXTENDED WRITE
+     * AL = 00h: write without verify
+     * Return:
+     * CF clear if successful
+     * CF set on error, AH = error code
+     */
+    RegsIn.b.ah = 0x43;                 // Subfunction 43h
+    RegsIn.b.al = 0x00;                 // Write without verify
+    RegsIn.b.dl = DriveNumber;          // Drive number in DL (0x80 - harddisk)
+    RegsIn.x.ds = BIOSCALLBUFSEGMENT;   // DS:SI -> disk address packet
+    RegsIn.w.si = BIOSCALLBUFOFFSET;
+
+    /* Retry 3 times */
+    for (RetryCount = 0; RetryCount < 3; ++RetryCount)
+    {
+        Int386(0x13, &RegsIn, &RegsOut);
+
+        if (INT386_SUCCESS(RegsOut))
+            return TRUE;
+
+        DiskResetController(DriveNumber);
+    }
+
+    ERR("Disk Write Failed in LBA mode: %x (%s) (DriveNumber: 0x%x SectorNumber: %I64d SectorCount: %d)\n",
+        RegsOut.b.ah, DiskGetErrorCodeString(RegsOut.b.ah),
+        DriveNumber, SectorNumber, SectorCount);
+
+    return FALSE;
+}
+
 #if defined(__i386__) || defined(_M_AMD64)
 VOID __cdecl DiskStopFloppyMotor(VOID)
 {

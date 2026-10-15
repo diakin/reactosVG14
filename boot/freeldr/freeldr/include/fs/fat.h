@@ -173,3 +173,15 @@ typedef struct
 #define ISFATX(FT) ((FT) == FATX16 || (FT) == FATX32)
 
 const DEVVTBL* FatMount(ULONG DeviceId);
+
+typedef BOOLEAN
+(*PFAT_SECTOR_RUN_CALLBACK)(
+    IN ULONG SectorNumber, /* Relative to the start of the volume */
+    IN ULONG SectorCount,
+    IN PVOID Context);
+
+ARC_STATUS
+FatEnumFileSectors(
+    IN ULONG FileId,
+    IN PFAT_SECTOR_RUN_CALLBACK Callback,
+    IN PVOID Context);

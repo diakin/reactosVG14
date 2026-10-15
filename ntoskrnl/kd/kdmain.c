@@ -144,6 +144,12 @@ KdpGetDebugMode(
             KdpLogFileName.Buffer = p1;
         }
     }
+    /* Check for debug log in reserved physical memory */
+    else if (!_strnicmp(p2, "RAM", 3))
+    {
+        p2 += 3;
+        KdpDebugMode.Ram = TRUE;
+    }
 
     return p2;
 }

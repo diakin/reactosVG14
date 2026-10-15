@@ -11,6 +11,7 @@
 
 #include <ntoskrnl.h>
 #include <reactos/buildno.h>
+#include <reactos/kdramlog.h>
 #include "kd.h"
 #include "kdterminal.h"
 #ifdef KDBG
@@ -57,6 +58,7 @@ PKDP_INIT_ROUTINE InitRoutines[KdMax] =
     KdpScreenInit,
     KdpSerialInit,
     KdpDebugLogInit,
+    KdpRamLogInit,
 #ifdef KDBG // See kdb_cli.c
     KdpKdbgInit
 #endif
@@ -402,6 +404,181 @@ Failure:
     }
 
     return Status;
+}
+
+/* RAM DEBUG LOG FUNCTIONS ***************************************************/
+
+/* Messages printed before the reserved region is mapped */
+#define KdpRamEarlyBufferSize  (1024 * 32)
+static CHAR KdpRamEarlyBuffer[KdpRamEarlyBufferSize];
+static ULONG KdpRamEarlyLength = 0;
+
+static KSPIN_LOCK KdpRamLogSpinLock;
+static volatile KDRAMLOG_HEADER* KdpRamLogHeader = NULL;
+static volatile CHAR* KdpRamLogData = NULL;
+
+static VOID
+KdpRamLogWrite(
+    _In_ PCCH String,
+    _In_ ULONG Length)
+{
+    ULONG BufferSize = KdpRamLogHeader->BufferSize;
+    ULONG Position = KdpRamLogHeader->WritePosition;
+    ULONG FirstPart;
+
+    /* Only the end of a too long string fits */
+    if (Length > BufferSize)
+    {
+        String += Length - BufferSize;
+        Length = BufferSize;
+    }
+
+    FirstPart = min(Length, BufferSize - Position);
+    RtlCopyMemory((PVOID)(KdpRamLogData + Position), String, FirstPart);
+    RtlCopyMemory((PVOID)KdpRamLogData, String + FirstPart, Length - FirstPart);
+
+    /* The data is written before the position that makes it visible */
+    Position += Length;
+    if (Position >= BufferSize)
+    {
+        Position -= BufferSize;
+        KdpRamLogHeader->Wrapped = 1;
+    }
+    KdpRamLogHeader->WritePosition = Position;
+}
+
+static VOID
+NTAPI
+KdpPrintToRamLog(
+    _In_ PCCH String,
+    _In_ ULONG Length)
+{
+    KIRQL OldIrql;
+    ULONG EarlyLength;
+
+    /* Acquire the printing spinlock without waiting at raised IRQL */
+    OldIrql = KdbpAcquireLock(&KdpRamLogSpinLock);
+
+    if (KdpRamLogHeader)
+    {
+        KdpRamLogWrite(String, Length);
+    }
+    else
+    {
+        /* Keep the first messages until the region is mapped */
+        EarlyLength = min(Length, KdpRamEarlyBufferSize - KdpRamEarlyLength);
+        RtlCopyMemory(KdpRamEarlyBuffer + KdpRamEarlyLength, String, EarlyLength);
+        KdpRamEarlyLength += EarlyLength;
+    }
+
+    /* Release the spinlock */
+    KdbpReleaseLock(&KdpRamLogSpinLock, OldIrql);
+}
+
+/* Checks that the loader reserved the region, so that it is not used
+ * by the memory manager. */
+static BOOLEAN
+KdpIsRamLogRegionReserved(VOID)
+{
+    PLIST_ENTRY ListEntry;
+    PMEMORY_ALLOCATION_DESCRIPTOR Descriptor;
+    PFN_NUMBER FirstPage = KDRAMLOG_PHYSICAL_ADDRESS >> PAGE_SHIFT;
+    PFN_NUMBER LastPage = (KDRAMLOG_PHYSICAL_ADDRESS + KDRAMLOG_REGION_SIZE) >> PAGE_SHIFT;
+
+    if (!KeLoaderBlock)
+        return FALSE;
+
+    for (ListEntry = KeLoaderBlock->MemoryDescriptorListHead.Flink;
+         ListEntry != &KeLoaderBlock->MemoryDescriptorListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        Descriptor = CONTAINING_RECORD(ListEntry,
+                                       MEMORY_ALLOCATION_DESCRIPTOR,
+                                       ListEntry);
+
+        if (Descriptor->MemoryType == LoaderSpecialMemory &&
+            Descriptor->BasePage <= FirstPage &&
+            Descriptor->BasePage + Descriptor->PageCount >= LastPage)
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+NTSTATUS
+NTAPI
+KdpRamLogInit(
+    _In_ PKD_DISPATCH_TABLE DispatchTable,
+    _In_ ULONG BootPhase)
+{
+    static const CHAR BootMarker[] =
+        "\r\n===== Boot: ReactOS " KERNEL_VERSION_STR
+        " (Build " KERNEL_VERSION_BUILD_STR ") =====\r\n";
+    PHYSICAL_ADDRESS PhysicalAddress;
+    PVOID RegionBase;
+    KIRQL OldIrql;
+
+    if (!KdpDebugMode.Ram)
+        return STATUS_PORT_DISCONNECTED;
+
+    if (BootPhase == 0)
+    {
+        KeInitializeSpinLock(&KdpRamLogSpinLock);
+
+        /* Write out the functions that we support for now */
+        DispatchTable->KdpPrintRoutine = KdpPrintToRamLog;
+
+        /* Register for BootPhase 1 initialization and as a Provider */
+        DispatchTable->KdpInitRoutine = KdpRamLogInit;
+        InsertTailList(&KdProviders, &DispatchTable->KdProvidersList);
+
+        KdpPrintToRamLog(BootMarker, sizeof(BootMarker) - 1);
+    }
+    else if (BootPhase == 1)
+    {
+        if (!KdpIsRamLogRegionReserved())
+        {
+            HalDisplayString("   RAM log debugging disabled: the region is not reserved by the loader\r\n");
+            KdpDebugMode.Ram = FALSE;
+            RemoveEntryList(&DispatchTable->KdProvidersList);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+
+        /* Map the region uncached, so that the data reaches memory
+         * before a reset that does not write back the CPU caches. */
+        PhysicalAddress.QuadPart = KDRAMLOG_PHYSICAL_ADDRESS;
+        RegionBase = MmMapIoSpace(PhysicalAddress, KDRAMLOG_REGION_SIZE, MmNonCached);
+        if (!RegionBase)
+        {
+            KdpDebugMode.Ram = FALSE;
+            RemoveEntryList(&DispatchTable->KdProvidersList);
+            return STATUS_NO_MEMORY;
+        }
+
+        OldIrql = KdbpAcquireLock(&KdpRamLogSpinLock);
+
+        /* Start a new log. FreeLoader has already saved the previous one. */
+        KdpRamLogHeader = RegionBase;
+        KdpRamLogData = (PCHAR)RegionBase + sizeof(KDRAMLOG_HEADER);
+        KdpRamLogHeader->Signature = 0;
+        KdpRamLogHeader->HeaderSize = sizeof(KDRAMLOG_HEADER);
+        KdpRamLogHeader->BufferSize = KDRAMLOG_BUFFER_SIZE;
+        KdpRamLogHeader->WritePosition = 0;
+        KdpRamLogHeader->Wrapped = 0;
+        KdpRamLogHeader->Signature = KDRAMLOG_SIGNATURE;
+
+        /* Move the early messages into the region */
+        KdpRamLogWrite(KdpRamEarlyBuffer, KdpRamEarlyLength);
+
+        KdbpReleaseLock(&KdpRamLogSpinLock, OldIrql);
+
+        /* Announce ourselves */
+        HalDisplayString("   RAM log debugging enabled\r\n");
+    }
+
+    return STATUS_SUCCESS;
 }
 
 /* SERIAL FUNCTIONS **********************************************************/

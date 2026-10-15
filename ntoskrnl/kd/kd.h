@@ -69,6 +69,12 @@ KdpDebugLogInit(
     _In_ struct _KD_DISPATCH_TABLE *DispatchTable,
     _In_ ULONG BootPhase);
 
+NTSTATUS
+NTAPI
+KdpRamLogInit(
+    _In_ struct _KD_DISPATCH_TABLE *DispatchTable,
+    _In_ ULONG BootPhase);
+
 #ifdef KDBG
 #define KdpKdbgInit KdbInitialize
 #endif
@@ -86,8 +92,9 @@ KdpDebugLogInit(
 #define KdScreen    0
 #define KdSerial    1
 #define KdFile      2
-#define KdKdbg      3
-#define KdMax       4
+#define KdRam       3
+#define KdKdbg      4
+#define KdMax       5
 
 /* KD Private Debug Modes */
 typedef struct _KDP_DEBUG_MODE
@@ -100,6 +107,7 @@ typedef struct _KDP_DEBUG_MODE
             UCHAR Screen :1;
             UCHAR Serial :1;
             UCHAR File   :1;
+            UCHAR Ram    :1;
         };
 
         /* Generic Value */

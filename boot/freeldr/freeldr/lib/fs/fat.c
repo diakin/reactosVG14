@@ -1549,6 +1549,58 @@ const DEVVTBL FatFuncTable =
     L"fastfat",
 };
 
+/*
+ * Calls Callback for each cluster of a file opened on a FAT volume, with the
+ * volume-relative sectors of that cluster, until FileSize bytes are covered.
+ * The last run is cut to the sectors that hold file data.
+ * Used to overwrite the contents of an existing file in place.
+ */
+ARC_STATUS
+FatEnumFileSectors(
+    IN ULONG FileId,
+    IN PFAT_SECTOR_RUN_CALLBACK Callback,
+    IN PVOID Context)
+{
+    PFAT_FILE_INFO FileHandle;
+    PFAT_VOLUME_INFO Volume;
+    PCWSTR ServiceName;
+    UINT32 ClusterNumber;
+    ULONG BytesPerCluster, BytesLeft, SectorCount;
+
+    ServiceName = FsGetServiceName(FileId);
+    if (!ServiceName || _wcsicmp(ServiceName, FatFuncTable.ServiceName) != 0)
+        return EINVAL;
+
+    FileHandle = FsGetDeviceSpecific(FileId);
+    Volume = FileHandle->Volume;
+    if (ISFATX(Volume->FatType) || Volume->BytesPerSector != SECTOR_SIZE)
+        return EINVAL;
+
+    BytesPerCluster = Volume->SectorsPerCluster * SECTOR_SIZE;
+    BytesLeft = FileHandle->FileSize;
+    ClusterNumber = FileHandle->StartCluster;
+
+    while (BytesLeft > 0)
+    {
+        if (ClusterNumber < 2 || FAT_IS_END_CLUSTER(ClusterNumber))
+            return EIO;
+
+        SectorCount = (min(BytesLeft, BytesPerCluster) + SECTOR_SIZE - 1) / SECTOR_SIZE;
+        if (!Callback(((ClusterNumber - 2) * Volume->SectorsPerCluster) + Volume->DataSectorStart,
+                      SectorCount,
+                      Context))
+        {
+            return EIO;
+        }
+
+        BytesLeft -= min(BytesLeft, BytesPerCluster);
+        if (BytesLeft > 0 && !FatGetFatEntry(Volume, ClusterNumber, &ClusterNumber))
+            return EIO;
+    }
+
+    return ESUCCESS;
+}
+
 const DEVVTBL* FatMount(ULONG DeviceId)
 {
     PFAT_VOLUME_INFO Volume;
