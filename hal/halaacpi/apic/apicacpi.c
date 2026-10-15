@@ -277,7 +277,7 @@ HalpInitMpInfo(
                         HalpIntiInfo[IntI].TriggerMode = 1; // Level-triggered
                     }
 
-                    HalpIntiInfo[IntI].Polarity = (USHORT)(NmiSource->IntiFlags & 0xFFFC);
+                    HalpIntiInfo[IntI].Polarity = (UCHAR)(NmiSource->IntiFlags & ACPI_MADT_POLARITY_MASK);
                 }
             }
 
