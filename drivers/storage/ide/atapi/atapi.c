@@ -1412,10 +1412,11 @@ IdeSendCommand(
         RtlZeroMemory(Srb->DataBuffer, Srb->DataTransferLength);
         RtlZeroMemory(&Inquiry, sizeof(Inquiry));
 
-        Inquiry.DeviceTypeQualifier &= 0xE0;
+        /* Byte 0: DeviceType in bits 0-4, byte 1: RemovableMedia in bit 7 */
+        Inquiry.DeviceType = DIRECT_ACCESS_DEVICE;
 
         if (HwDeviceExtension->DeviceFlags[Device] & 0x10)
-            Inquiry.RemovableMedia |= 0x80;
+            Inquiry.RemovableMedia = 1;
 
         for (ix = 0; ix < 8; ix += 2)
         {
