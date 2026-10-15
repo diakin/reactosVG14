@@ -1985,7 +1985,7 @@ ACPIGetConvertToDeviceID(
             }
             RtlZeroMemory(deviceID, DataLen);
 
-            strncpy(deviceID, "ACPI\\PciBarTarget", (DataLen - 1));
+            RtlCopyMemory(deviceID, "ACPI\\PciBarTarget", sizeof("ACPI\\PciBarTarget"));
             goto Finish;
         }
     }
@@ -2702,7 +2702,7 @@ ACPIGetConvertToHardwareIDWide(
 
         IsAllocated = TRUE;
 
-        strncpy(IdString, "PciBarTarget", (DataBuffLen - 1));
+        RtlCopyMemory(IdString, "PciBarTarget", sizeof("PciBarTarget"));
         goto Finish;
     }
 
