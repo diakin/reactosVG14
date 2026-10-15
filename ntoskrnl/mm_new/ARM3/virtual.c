@@ -5070,7 +5070,7 @@ ErrorVadExit:
             QuotaCopyOnWrite = QuotaCharge;
         }
 
-        if (QuotaCopyOnWrite);
+        if (QuotaCopyOnWrite)
         {
             Status = PsChargeProcessPageFileQuota(Process, QuotaCopyOnWrite);
             if (!NT_SUCCESS(Status))
