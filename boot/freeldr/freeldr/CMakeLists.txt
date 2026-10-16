@@ -163,6 +163,7 @@ if(ARCH STREQUAL "i386")
             arch/i386/pc/pcdisk.c
             arch/i386/pc/pchw.c
             arch/i386/pc/pcmem.c
+            arch/i386/pc/pcramlog.c
             arch/i386/pc/pcrtc.c
             arch/i386/pc/pcvesa.c
             arch/i386/pc/pcvideo.c)
@@ -193,6 +194,7 @@ elseif(ARCH STREQUAL "amd64")
         arch/i386/pc/pcdisk.c
         arch/i386/pc/pchw.c
         arch/i386/pc/pcmem.c
+        arch/i386/pc/pcramlog.c
         arch/i386/pc/pcrtc.c
         arch/i386/pc/pcvesa.c
         arch/i386/pc/pcvideo.c)

@@ -47,6 +47,8 @@ VOID PcVideoPrepareForReactOS(VOID);
 VOID PcPrepareForReactOS(VOID);
 
 PFREELDR_MEMORY_DESCRIPTOR PcMemGetMemoryMap(ULONG *MemoryMapSize);
+extern BOOLEAN PcRamLogRegionReserved;
+VOID PcRamLogSave(VOID);
 BOOLEAN PcFindPciBios(PPCI_REGISTRY_INFO BusData);
 
 /*
@@ -61,6 +63,7 @@ BOOLEAN DiskResetController(UCHAR DriveNumber);
 // BOOLEAN DiskGetExtendedDriveParameters(UCHAR DriveNumber, PVOID Buffer, USHORT BufferSize);
 
 BOOLEAN PcDiskReadLogicalSectors(UCHAR DriveNumber, ULONGLONG SectorNumber, ULONG SectorCount, PVOID Buffer);
+BOOLEAN PcDiskWriteLogicalSectors(UCHAR DriveNumber, ULONGLONG SectorNumber, ULONG SectorCount, PVOID Buffer);
 BOOLEAN PcDiskGetDriveGeometry(UCHAR DriveNumber, PGEOMETRY DriveGeometry);
 ULONG PcDiskGetCacheableBlockCount(UCHAR DriveNumber);
 

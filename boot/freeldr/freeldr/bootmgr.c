@@ -347,6 +347,11 @@ VOID RunLoader(VOID)
         return;
     }
 
+#if (defined(_M_IX86) || defined(_M_AMD64)) && !defined(SARCH_XBOX) && !defined(SARCH_PC98)
+    /* Save the kernel RAM debug log left by the previous boot, if any */
+    PcRamLogSave();
+#endif
+
     OperatingSystemList = InitOperatingSystemList(SectionId,
                                                   &OperatingSystemCount,
                                                   &DefaultOperatingSystem);

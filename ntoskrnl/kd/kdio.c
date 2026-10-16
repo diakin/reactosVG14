@@ -11,6 +11,7 @@
 
 #include <ntoskrnl.h>
 #include <reactos/buildno.h>
+#include <reactos/kdramlog.h>
 #include "kd.h"
 #include "kdterminal.h"
 #ifdef KDBG
@@ -26,6 +27,11 @@
 /* GLOBALS *******************************************************************/
 
 #define KdpBufferSize  (1024 * 512)
+/* Static buffer for messages printed in BootPhase 0, before the pool is
+ * available. Its contents are moved into the pool buffer in BootPhase 1. */
+#define KdpEarlyBufferSize  (1024 * 64)
+static CHAR KdpEarlyBuffer[KdpEarlyBufferSize];
+static ULONG KdpDebugBufferSize = 0;
 static BOOLEAN KdpLoggingEnabled = FALSE;
 static PCHAR KdpDebugBuffer = NULL;
 static volatile ULONG KdpCurrentPosition = 0;
@@ -52,6 +58,7 @@ PKDP_INIT_ROUTINE InitRoutines[KdMax] =
     KdpScreenInit,
     KdpSerialInit,
     KdpDebugLogInit,
+    KdpRamLogInit,
 #ifdef KDBG // See kdb_cli.c
     KdpKdbgInit
 #endif
@@ -133,8 +140,8 @@ KdpLoggerThread(PVOID Context)
         num = KdpFreeBytes;
 
         /* Now securely calculate values, based on local variables */
-        beg = (end + num) % KdpBufferSize;
-        num = KdpBufferSize - num;
+        beg = (end + num) % KdpDebugBufferSize;
+        num = KdpDebugBufferSize - num;
 
         /* Nothing to do? */
         if (num == 0)
@@ -148,7 +155,7 @@ KdpLoggerThread(PVOID Context)
         else
         {
             NtWriteFile(KdpLogFileHandle, NULL, NULL, NULL, &Iosb,
-                        KdpDebugBuffer + beg, KdpBufferSize - beg, NULL, NULL);
+                        KdpDebugBuffer + beg, KdpDebugBufferSize - beg, NULL, NULL);
 
             NtWriteFile(KdpLogFileHandle, NULL, NULL, NULL, &Iosb,
                         KdpDebugBuffer, end, NULL, NULL);
@@ -176,7 +183,7 @@ KdpPrintToLogFile(
     num = min(Length, KdpFreeBytes);
     if (num != 0)
     {
-        end = (beg + num) % KdpBufferSize;
+        end = (beg + num) % KdpDebugBufferSize;
         KdpCurrentPosition = end;
         KdpFreeBytes -= num;
 
@@ -186,8 +193,8 @@ KdpPrintToLogFile(
         }
         else
         {
-            RtlCopyMemory(KdpDebugBuffer + beg, String, KdpBufferSize - beg);
-            RtlCopyMemory(KdpDebugBuffer, String + KdpBufferSize - beg, end);
+            RtlCopyMemory(KdpDebugBuffer + beg, String, KdpDebugBufferSize - beg);
+            RtlCopyMemory(KdpDebugBuffer, String + KdpDebugBufferSize - beg, end);
         }
     }
 
@@ -212,29 +219,62 @@ KdpDebugLogInit(
 
     if (BootPhase == 0)
     {
+        static const CHAR BootMarker[] =
+            "\r\n===== Boot: ReactOS " KERNEL_VERSION_STR
+            " (Build " KERNEL_VERSION_BUILD_STR ") =====\r\n";
+
+        /* Initialize spinlock */
+        KeInitializeSpinLock(&KdpDebugLogSpinLock);
+
+        /* Use the static buffer until the pool is available */
+        KdpDebugBuffer = KdpEarlyBuffer;
+        KdpDebugBufferSize = KdpEarlyBufferSize;
+        KdpCurrentPosition = 0;
+        KdpFreeBytes = KdpEarlyBufferSize;
+
         /* Write out the functions that we support for now */
         DispatchTable->KdpPrintRoutine = KdpPrintToLogFile;
 
         /* Register for BootPhase 1 initialization and as a Provider */
         DispatchTable->KdpInitRoutine = KdpDebugLogInit;
         InsertTailList(&KdProviders, &DispatchTable->KdProvidersList);
+
+        /* Separate this boot from the previous ones in the log file */
+        KdpPrintToLogFile(BootMarker, sizeof(BootMarker) - 1);
     }
     else if (BootPhase == 1)
     {
-        /* Allocate a buffer for debug log */
-        KdpDebugBuffer = ExAllocatePoolZero(NonPagedPool,
-                                            KdpBufferSize,
-                                            TAG_KDBG);
-        if (!KdpDebugBuffer)
-        {
-            KdpDebugMode.File = FALSE;
-            RemoveEntryList(&DispatchTable->KdProvidersList);
-            return STATUS_NO_MEMORY;
-        }
-        KdpFreeBytes = KdpBufferSize;
+        PCHAR PoolBuffer;
+        KIRQL OldIrql;
+        ULONG UsedBytes;
 
-        /* Initialize spinlock */
-        KeInitializeSpinLock(&KdpDebugLogSpinLock);
+        /* Allocate a buffer for debug log */
+        PoolBuffer = ExAllocatePoolZero(NonPagedPool,
+                                        KdpBufferSize,
+                                        TAG_KDBG);
+        if (PoolBuffer)
+        {
+            /* Move the BootPhase 0 messages into the pool buffer.
+             * The logger thread is not started yet, so the early
+             * buffer has not wrapped: its data begins at offset 0. */
+            OldIrql = KdbpAcquireLock(&KdpDebugLogSpinLock);
+
+            UsedBytes = KdpDebugBufferSize - KdpFreeBytes;
+            RtlCopyMemory(PoolBuffer, KdpDebugBuffer, UsedBytes);
+
+            KdpDebugBuffer = PoolBuffer;
+            KdpDebugBufferSize = KdpBufferSize;
+            KdpCurrentPosition = UsedBytes;
+            KdpFreeBytes = KdpBufferSize - UsedBytes;
+
+            KdbpReleaseLock(&KdpDebugLogSpinLock, OldIrql);
+        }
+        else
+        {
+            /* Keep logging into the static buffer */
+            DPRINT1("Failed to allocate the debug log buffer, using %lu bytes\n",
+                    KdpDebugBufferSize);
+        }
 
         /* Register for later BootPhase 2 reinitialization */
         DispatchTable->KdpInitRoutine = KdpDebugLogInit;
@@ -356,13 +396,199 @@ KdpDebugLogInit(
 
 Failure:
         KdpFreeBytes = 0;
-        ExFreePoolWithTag(KdpDebugBuffer, TAG_KDBG);
+        if (KdpDebugBuffer != KdpEarlyBuffer)
+            ExFreePoolWithTag(KdpDebugBuffer, TAG_KDBG);
         KdpDebugBuffer = NULL;
         KdpDebugMode.File = FALSE;
         RemoveEntryList(&DispatchTable->KdProvidersList);
     }
 
     return Status;
+}
+
+/* RAM DEBUG LOG FUNCTIONS ***************************************************/
+
+/* Messages printed before the reserved region is mapped */
+#define KdpRamEarlyBufferSize  (1024 * 32)
+static CHAR KdpRamEarlyBuffer[KdpRamEarlyBufferSize];
+static ULONG KdpRamEarlyLength = 0;
+
+static KSPIN_LOCK KdpRamLogSpinLock;
+/* Set by "/DEBUGPORT=RAM:REBOOT", but effective only once the region is mapped */
+BOOLEAN KdRamLogRebootOnBugCheck = FALSE;
+static BOOLEAN KdpRamLogRebootRequested = FALSE;
+static volatile KDRAMLOG_HEADER* KdpRamLogHeader = NULL;
+static volatile CHAR* KdpRamLogData = NULL;
+
+static VOID
+KdpRamLogWrite(
+    _In_ PCCH String,
+    _In_ ULONG Length)
+{
+    ULONG BufferSize = KdpRamLogHeader->BufferSize;
+    ULONG Position = KdpRamLogHeader->WritePosition;
+    ULONG FirstPart;
+
+    /* Only the end of a too long string fits */
+    if (Length > BufferSize)
+    {
+        String += Length - BufferSize;
+        Length = BufferSize;
+    }
+
+    FirstPart = min(Length, BufferSize - Position);
+    RtlCopyMemory((PVOID)(KdpRamLogData + Position), String, FirstPart);
+    RtlCopyMemory((PVOID)KdpRamLogData, String + FirstPart, Length - FirstPart);
+
+    /* The data is written before the position that makes it visible */
+    Position += Length;
+    if (Position >= BufferSize)
+    {
+        Position -= BufferSize;
+        KdpRamLogHeader->Wrapped = 1;
+    }
+    KdpRamLogHeader->WritePosition = Position;
+}
+
+static VOID
+NTAPI
+KdpPrintToRamLog(
+    _In_ PCCH String,
+    _In_ ULONG Length)
+{
+    KIRQL OldIrql;
+    ULONG EarlyLength;
+
+    /* Acquire the printing spinlock without waiting at raised IRQL */
+    OldIrql = KdbpAcquireLock(&KdpRamLogSpinLock);
+
+    if (KdpRamLogHeader)
+    {
+        KdpRamLogWrite(String, Length);
+    }
+    else
+    {
+        /* Keep the first messages until the region is mapped */
+        EarlyLength = min(Length, KdpRamEarlyBufferSize - KdpRamEarlyLength);
+        RtlCopyMemory(KdpRamEarlyBuffer + KdpRamEarlyLength, String, EarlyLength);
+        KdpRamEarlyLength += EarlyLength;
+    }
+
+    /* Release the spinlock */
+    KdbpReleaseLock(&KdpRamLogSpinLock, OldIrql);
+}
+
+/* Checks that the loader reserved the region, so that it is not used
+ * by the memory manager. */
+static BOOLEAN
+KdpIsRamLogRegionReserved(VOID)
+{
+    PLIST_ENTRY ListEntry;
+    PMEMORY_ALLOCATION_DESCRIPTOR Descriptor;
+    PFN_NUMBER FirstPage = KDRAMLOG_PHYSICAL_ADDRESS >> PAGE_SHIFT;
+    PFN_NUMBER LastPage = (KDRAMLOG_PHYSICAL_ADDRESS + KDRAMLOG_REGION_SIZE) >> PAGE_SHIFT;
+
+    if (!KeLoaderBlock)
+        return FALSE;
+
+    for (ListEntry = KeLoaderBlock->MemoryDescriptorListHead.Flink;
+         ListEntry != &KeLoaderBlock->MemoryDescriptorListHead;
+         ListEntry = ListEntry->Flink)
+    {
+        Descriptor = CONTAINING_RECORD(ListEntry,
+                                       MEMORY_ALLOCATION_DESCRIPTOR,
+                                       ListEntry);
+
+        if (Descriptor->MemoryType == LoaderSpecialMemory &&
+            Descriptor->BasePage <= FirstPage &&
+            Descriptor->BasePage + Descriptor->PageCount >= LastPage)
+        {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+NTSTATUS
+NTAPI
+KdpRamLogInit(
+    _In_ PKD_DISPATCH_TABLE DispatchTable,
+    _In_ ULONG BootPhase)
+{
+    static const CHAR BootMarker[] =
+        "\r\n===== Boot: ReactOS " KERNEL_VERSION_STR
+        " (Build " KERNEL_VERSION_BUILD_STR ") =====\r\n";
+    PHYSICAL_ADDRESS PhysicalAddress;
+    PVOID RegionBase;
+    KIRQL OldIrql;
+
+    if (!KdpDebugMode.Ram)
+        return STATUS_PORT_DISCONNECTED;
+
+    if (BootPhase == 0)
+    {
+        KeInitializeSpinLock(&KdpRamLogSpinLock);
+
+        KdpRamLogRebootRequested = KdRamLogRebootOnBugCheck;
+        KdRamLogRebootOnBugCheck = FALSE;
+
+        /* Write out the functions that we support for now */
+        DispatchTable->KdpPrintRoutine = KdpPrintToRamLog;
+
+        /* Register for BootPhase 1 initialization and as a Provider */
+        DispatchTable->KdpInitRoutine = KdpRamLogInit;
+        InsertTailList(&KdProviders, &DispatchTable->KdProvidersList);
+
+        KdpPrintToRamLog(BootMarker, sizeof(BootMarker) - 1);
+    }
+    else if (BootPhase == 1)
+    {
+        if (!KdpIsRamLogRegionReserved())
+        {
+            HalDisplayString("   RAM log debugging disabled: the region is not reserved by the loader\r\n");
+            KdpDebugMode.Ram = FALSE;
+            RemoveEntryList(&DispatchTable->KdProvidersList);
+            return STATUS_CONFLICTING_ADDRESSES;
+        }
+
+        /* Map the region uncached, so that the data reaches memory
+         * before a reset that does not write back the CPU caches. */
+        PhysicalAddress.QuadPart = KDRAMLOG_PHYSICAL_ADDRESS;
+        RegionBase = MmMapIoSpace(PhysicalAddress, KDRAMLOG_REGION_SIZE, MmNonCached);
+        if (!RegionBase)
+        {
+            KdpDebugMode.Ram = FALSE;
+            RemoveEntryList(&DispatchTable->KdProvidersList);
+            return STATUS_NO_MEMORY;
+        }
+
+        OldIrql = KdbpAcquireLock(&KdpRamLogSpinLock);
+
+        /* Start a new log. FreeLoader has already saved the previous one. */
+        KdpRamLogHeader = RegionBase;
+        KdpRamLogData = (PCHAR)RegionBase + sizeof(KDRAMLOG_HEADER);
+        KdpRamLogHeader->Signature = 0;
+        KdpRamLogHeader->HeaderSize = sizeof(KDRAMLOG_HEADER);
+        KdpRamLogHeader->BufferSize = KDRAMLOG_BUFFER_SIZE;
+        KdpRamLogHeader->WritePosition = 0;
+        KdpRamLogHeader->Wrapped = 0;
+        KdpRamLogHeader->Signature = KDRAMLOG_SIGNATURE;
+
+        /* Move the early messages into the region */
+        KdpRamLogWrite(KdpRamEarlyBuffer, KdpRamEarlyLength);
+
+        KdbpReleaseLock(&KdpRamLogSpinLock, OldIrql);
+
+        KdRamLogRebootOnBugCheck = KdpRamLogRebootRequested;
+
+        /* Announce ourselves */
+        HalDisplayString(KdRamLogRebootOnBugCheck ?
+                         "   RAM log debugging enabled, reboot on bug check\r\n" :
+                         "   RAM log debugging enabled\r\n");
+    }
+
+    return STATUS_SUCCESS;
 }
 
 /* SERIAL FUNCTIONS **********************************************************/

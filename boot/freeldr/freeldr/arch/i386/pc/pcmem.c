@@ -24,6 +24,7 @@
 
 #include <freeldr.h>
 #include <arch/pc/x86common.h>
+#include <reactos/kdramlog.h>
 
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(MEMORY);
@@ -606,6 +607,37 @@ PcMemFinalizeMemoryMap(
     return PcMapCount;
 }
 
+/* TRUE when the kernel RAM debug log region (/DEBUGPORT=RAM) is reserved */
+BOOLEAN PcRamLogRegionReserved = FALSE;
+
+/*
+ * Reserves the fixed region where the kernel keeps its RAM debug log, so that
+ * neither FreeLoader nor the kernel memory manager use it. The region is
+ * reserved only if it lies entirely in free memory.
+ */
+static VOID
+PcMemReserveRamLogRegion(VOID)
+{
+    PFN_NUMBER BasePage = KDRAMLOG_PHYSICAL_ADDRESS / PAGE_SIZE;
+    PFN_NUMBER PageCount = KDRAMLOG_REGION_SIZE / PAGE_SIZE;
+    ULONG Index;
+
+    for (Index = 0; Index < PcMapCount; Index++)
+    {
+        if ((PcMemoryMap[Index].MemoryType == LoaderFree) &&
+            (PcMemoryMap[Index].BasePage <= BasePage) &&
+            (PcMemoryMap[Index].BasePage + PcMemoryMap[Index].PageCount >= BasePage + PageCount))
+        {
+            SetMemory(PcMemoryMap, KDRAMLOG_PHYSICAL_ADDRESS, KDRAMLOG_REGION_SIZE, LoaderSpecialMemory);
+            PcRamLogRegionReserved = TRUE;
+            return;
+        }
+    }
+
+    WARN("RAM log region 0x%lx is not in free memory, it is not reserved\n",
+         KDRAMLOG_PHYSICAL_ADDRESS);
+}
+
 PFREELDR_MEMORY_DESCRIPTOR
 PcMemGetMemoryMap(ULONG *MemoryMapSize)
 {
@@ -667,6 +699,8 @@ PcMemGetMemoryMap(ULONG *MemoryMapSize)
     SetMemory(PcMemoryMap, 0x0A0000, 0x50000, LoaderFirmwarePermanent); // Video memory
     SetMemory(PcMemoryMap, 0x0F0000, 0x10000, LoaderSpecialMemory); // ROM
     SetMemory(PcMemoryMap, 0xFFF000, 0x01000, LoaderSpecialMemory); // unusable memory (do we really need this?)
+
+    PcMemReserveRamLogRegion();
 
     *MemoryMapSize = PcMemFinalizeMemoryMap(PcMemoryMap);
     return PcMemoryMap;

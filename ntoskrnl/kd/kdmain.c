@@ -144,6 +144,19 @@ KdpGetDebugMode(
             KdpLogFileName.Buffer = p1;
         }
     }
+    /* Check for debug log in reserved physical memory */
+    else if (!_strnicmp(p2, "RAM", 3))
+    {
+        p2 += 3;
+        KdpDebugMode.Ram = TRUE;
+        /* " .. /DEBUGPORT=RAM:REBOOT .." : warm reboot on bug check,
+           so that FreeLoader saves the log */
+        if (!_strnicmp(p2, ":REBOOT", 7))
+        {
+            p2 += 7;
+            KdRamLogRebootOnBugCheck = TRUE;
+        }
+    }
 
     return p2;
 }

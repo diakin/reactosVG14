@@ -1052,6 +1052,17 @@ KeBugCheckWithTf(IN ULONG BugCheckCode,
                  KiBugCheckData[3],
                  KiBugCheckData[4]);
 
+#ifndef _WINKD_
+        /* With /DEBUGPORT=RAM:REBOOT, do a warm reboot instead of entering
+         * the debugger: the RAM log survives it and FreeLoader saves it. */
+        if (KdRamLogRebootOnBugCheck)
+        {
+            DbgPrint("*** Rebooting to save the RAM debug log ***\n");
+            KeStallExecutionProcessor(5 * 1000 * 1000);
+            HalReturnToFirmware(HalRebootRoutine);
+        }
+#endif
+
         /* Check if the debugger isn't currently connected */
         if (!KdDebuggerNotPresent)
         {

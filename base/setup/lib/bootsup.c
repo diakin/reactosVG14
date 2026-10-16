@@ -169,6 +169,11 @@ CreateFreeLoaderReactOSEntries(
     Options->OsLoadOptions = L"/DEBUG /DEBUGPORT=SCREEN /SOS";
     AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_Screen"));
 
+    /* ReactOS_ScreenRamLog */
+    BootEntry->FriendlyName = L"\"ReactOS (Screen + RAM log)\"";
+    Options->OsLoadOptions = L"/DEBUG /DEBUGPORT=SCREEN /DEBUGPORT=RAM:REBOOT /SOS";
+    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_ScreenRamLog"));
+
     /* ReactOS_LogFile */
     BootEntry->FriendlyName = L"\"ReactOS (Log file)\"";
 
