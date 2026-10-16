@@ -59,6 +59,7 @@ PKDP_INIT_ROUTINE InitRoutines[KdMax] =
     KdpSerialInit,
     KdpDebugLogInit,
     KdpRamLogInit,
+    KdpBeepInit,
 #ifdef KDBG // See kdb_cli.c
     KdpKdbgInit
 #endif

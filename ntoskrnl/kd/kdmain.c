@@ -157,6 +157,41 @@ KdpGetDebugMode(
             KdRamLogRebootOnBugCheck = TRUE;
         }
     }
+    /* Check for modem tones on the PC speaker */
+    else if (!_strnicmp(p2, "BEEP", 4))
+    {
+        p2 += 4;
+        KdpDebugMode.Beep = TRUE;
+        /* " .. /DEBUGPORT=BEEP:1200,24,1 .."
+           baud rate (300 or 1200), lines per page (1..64),
+           wait for a key after each page (0..1)
+        */
+        if (*p2 == ':')
+        {
+            p2++;
+            Value = (ULONG)atol(p2);
+            if (Value == 300 || Value == 1200)
+                KdBeepBaudRate = Value;
+
+            while (*p2 != '\0' && *p2 != ' ' && *p2 != ',') p2++;
+            if (*p2 == ',')
+            {
+                p2++;
+                Value = (ULONG)atol(p2);
+                if (Value > 0 && Value < 65)
+                    KdBeepPageLines = Value;
+
+                while (*p2 != '\0' && *p2 != ' ' && *p2 != ',') p2++;
+                if (*p2 == ',')
+                {
+                    p2++;
+                    Value = (ULONG)atol(p2);
+                    if (Value == 0 || Value == 1)
+                        KdBeepPagePause = (Value == 1);
+                }
+            }
+        }
+    }
 
     return p2;
 }
