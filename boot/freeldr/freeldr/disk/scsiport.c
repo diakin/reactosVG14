@@ -145,6 +145,20 @@ SpiSendSynchronousSrb(
     DeviceExtension->InterruptFlags &= ~SCSI_PORT_NEXT_REQUEST_READY;
     Srb->SrbFlags |= SRB_FLAGS_IS_ACTIVE;
 
+    /*
+     * The miniport may have asked for a per-SRB extension
+     * (HW_INITIALIZATION_DATA::SrbExtensionSize). Only one SRB is active at
+     * a time here, so the single buffer at the start of the common buffer
+     * is enough. Without it, Srb->SrbExtension stays NULL and the miniport
+     * dereferences a NULL pointer in HwStartIo.
+     */
+    if (DeviceExtension->SrbExtensionSize != 0)
+    {
+        Srb->SrbExtension = DeviceExtension->SrbExtensionBuffer;
+        if (Srb->SrbExtension)
+            RtlZeroMemory(Srb->SrbExtension, DeviceExtension->SrbExtensionSize);
+    }
+
     if (!DeviceExtension->HwStartIo(
             DeviceExtension->MiniPortDeviceExtension,
             Srb))
@@ -443,6 +457,14 @@ SpiCreatePortConfig(
         ConfigInfo->TaggedQueuing = HwInitData->TaggedQueuing;
         ConfigInfo->MultipleRequestPerLu = HwInitData->MultipleRequestPerLu;
 
+        /*
+         * MSDN (PORT_CONFIGURATION_INFORMATION): SrbExtensionSize is set by the
+         * port driver from HW_INITIALIZATION_DATA and may be changed by the
+         * miniport in HwFindAdapter. It was left at 0, so the value given by
+         * the miniport in HW_INITIALIZATION_DATA was lost.
+         */
+        ConfigInfo->SrbExtensionSize = HwInitData->SrbExtensionSize;
+
         /* Get the disk usage */
         ConfigInfo->AtdiskPrimaryClaimed = FALSE; // FIXME
         ConfigInfo->AtdiskSecondaryClaimed = FALSE; // FIXME
@@ -620,13 +642,36 @@ ScsiPortGetPhysicalAddress(
 
     DeviceExtension = ((PSCSI_PORT_DEVICE_EXTENSION)HwDeviceExtension) - 1;
 
+    /*
+     * FreeLdr runs with paging disabled, so physical and virtual addresses
+     * are the same. The previous code returned the offset inside the common
+     * buffer instead of an address, so a bus-master miniport programmed its
+     * DMA engine with a low-memory address (0x0 + offset).
+     */
     if (Srb == NULL || Srb->SenseInfoBuffer == VirtualAddress)
     {
         /* Simply look it up in the allocated common buffer */
         Offset = (PUCHAR)VirtualAddress - (PUCHAR)DeviceExtension->SrbExtensionBuffer;
 
-        BufferLength = DeviceExtension->CommonBufferLength - Offset;
-        PhysicalAddress.QuadPart = Offset;
+        if (DeviceExtension->SrbExtensionBuffer != NULL &&
+            Offset < DeviceExtension->CommonBufferLength)
+        {
+            BufferLength = DeviceExtension->CommonBufferLength - Offset;
+        }
+        else
+        {
+            /* Not in the common buffer (e.g. a sense buffer): one-page contiguous chunk */
+            BufferLength = PAGE_SIZE - ((ULONG_PTR)VirtualAddress & (PAGE_SIZE - 1));
+        }
+        PhysicalAddress.QuadPart = (ULONG_PTR)VirtualAddress;
+    }
+    else if ((PUCHAR)VirtualAddress >= (PUCHAR)Srb->DataBuffer &&
+             (PUCHAR)VirtualAddress < (PUCHAR)Srb->DataBuffer + Srb->DataTransferLength)
+    {
+        /* Data buffer of the SRB: physically contiguous because paging is off */
+        Offset = (PUCHAR)VirtualAddress - (PUCHAR)Srb->DataBuffer;
+        BufferLength = Srb->DataTransferLength - Offset;
+        PhysicalAddress.QuadPart = (ULONG_PTR)VirtualAddress;
     }
     else
     {
@@ -671,9 +716,14 @@ SpiAllocateCommonBuffer(
     /* Round it */
     BufSize = (BufSize + sizeof(LONGLONG) - 1) & ~(sizeof(LONGLONG) - 1);
 
-    /* Sum up into the total common buffer length, and round it to page size */
+    /*
+     * Sum up into the total common buffer length, and round it to page size.
+     * The SRB extension lives at the start of the buffer and the uncached
+     * extension at its end, so both sizes must be counted; otherwise the two
+     * overlap when NonCachedSize is a multiple of PAGE_SIZE.
+     */
     CommonBufferLength =
-        ROUND_TO_PAGES(NonCachedSize);
+        ROUND_TO_PAGES(NonCachedSize + BufSize);
 
     /* Allocate it */
     if (!DeviceExtension->AdapterObject)
@@ -1238,6 +1288,19 @@ ScsiPortInitialize(
             DeviceExtension->MaxTargedIds = PortConfig.MaximumNumberOfTargets;
 
         DeviceExtension->BusNum = PortConfig.SystemIoBusNumber;
+
+        /* Allocate the SRB extension if the miniport needs one and has no common buffer yet */
+        if (DeviceExtension->SrbExtensionBuffer == NULL &&
+            (HwInitializationData->SrbExtensionSize != 0 || PortConfig.SrbExtensionSize != 0))
+        {
+            DeviceExtension->SrbExtensionSize = max(HwInitializationData->SrbExtensionSize,
+                                                    PortConfig.SrbExtensionSize);
+            if (!NT_SUCCESS(SpiAllocateCommonBuffer(DeviceExtension, 0)))
+            {
+                FrLdrTempFree(DeviceExtension, TAG_SCSI_DEVEXT);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+        }
 
         TRACE("Adapter found: buses = %d, targets = %d\n",
                  PortConfig.NumberOfBuses, DeviceExtension->MaxTargedIds);
