@@ -149,6 +149,13 @@ KdpGetDebugMode(
     {
         p2 += 3;
         KdpDebugMode.Ram = TRUE;
+        /* " .. /DEBUGPORT=RAM:REBOOT .." : warm reboot on bug check,
+           so that FreeLoader saves the log */
+        if (!_strnicmp(p2, ":REBOOT", 7))
+        {
+            p2 += 7;
+            KdRamLogRebootOnBugCheck = TRUE;
+        }
     }
 
     return p2;

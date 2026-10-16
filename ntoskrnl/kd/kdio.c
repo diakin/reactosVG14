@@ -414,6 +414,9 @@ static CHAR KdpRamEarlyBuffer[KdpRamEarlyBufferSize];
 static ULONG KdpRamEarlyLength = 0;
 
 static KSPIN_LOCK KdpRamLogSpinLock;
+/* Set by "/DEBUGPORT=RAM:REBOOT", but effective only once the region is mapped */
+BOOLEAN KdRamLogRebootOnBugCheck = FALSE;
+static BOOLEAN KdpRamLogRebootRequested = FALSE;
 static volatile KDRAMLOG_HEADER* KdpRamLogHeader = NULL;
 static volatile CHAR* KdpRamLogData = NULL;
 
@@ -527,6 +530,9 @@ KdpRamLogInit(
     {
         KeInitializeSpinLock(&KdpRamLogSpinLock);
 
+        KdpRamLogRebootRequested = KdRamLogRebootOnBugCheck;
+        KdRamLogRebootOnBugCheck = FALSE;
+
         /* Write out the functions that we support for now */
         DispatchTable->KdpPrintRoutine = KdpPrintToRamLog;
 
@@ -574,8 +580,12 @@ KdpRamLogInit(
 
         KdbpReleaseLock(&KdpRamLogSpinLock, OldIrql);
 
+        KdRamLogRebootOnBugCheck = KdpRamLogRebootRequested;
+
         /* Announce ourselves */
-        HalDisplayString("   RAM log debugging enabled\r\n");
+        HalDisplayString(KdRamLogRebootOnBugCheck ?
+                         "   RAM log debugging enabled, reboot on bug check\r\n" :
+                         "   RAM log debugging enabled\r\n");
     }
 
     return STATUS_SUCCESS;

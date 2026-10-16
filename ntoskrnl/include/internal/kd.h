@@ -49,6 +49,11 @@ typedef enum _KDP_DEBUG_SERVICE
 
 #endif // _NTOSKRNL_
 
+#ifndef _WINKD_
+/* /DEBUGPORT=RAM:REBOOT, see kd/kdio.c */
+extern BOOLEAN KdRamLogRebootOnBugCheck;
+#endif
+
 #if DBG && defined(_M_IX86) && !defined(_WINKD_) // See ke/i386/traphdlr.c
 #define ID_Win32PreServiceHook 'WSH0'
 #define ID_Win32PostServiceHook 'WSH1'
