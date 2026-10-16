@@ -75,6 +75,12 @@ KdpRamLogInit(
     _In_ struct _KD_DISPATCH_TABLE *DispatchTable,
     _In_ ULONG BootPhase);
 
+NTSTATUS
+NTAPI
+KdpBeepInit(
+    _In_ struct _KD_DISPATCH_TABLE *DispatchTable,
+    _In_ ULONG BootPhase);
+
 #ifdef KDBG
 #define KdpKdbgInit KdbInitialize
 #endif
@@ -93,8 +99,9 @@ KdpRamLogInit(
 #define KdSerial    1
 #define KdFile      2
 #define KdRam       3
-#define KdKdbg      4
-#define KdMax       5
+#define KdBeep      4
+#define KdKdbg      5
+#define KdMax       6
 
 /* KD Private Debug Modes */
 typedef struct _KDP_DEBUG_MODE
@@ -108,6 +115,7 @@ typedef struct _KDP_DEBUG_MODE
             UCHAR Serial :1;
             UCHAR File   :1;
             UCHAR Ram    :1;
+            UCHAR Beep   :1;
         };
 
         /* Generic Value */
@@ -130,6 +138,11 @@ extern KDP_DEBUG_MODE KdpDebugMode;
 /* Port Information for the Serial Native Mode */
 extern ULONG  SerialPortNumber;
 extern CPPORT SerialPortInfo;
+
+/* PC speaker modem tones, see kdbeep.c */
+extern ULONG KdBeepBaudRate;
+extern ULONG KdBeepPageLines;
+extern BOOLEAN KdBeepPagePause;
 
 /* Logging file path */
 extern ANSI_STRING KdpLogFileName;
