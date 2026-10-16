@@ -327,8 +327,11 @@ static ARC_STATUS DiskOpen(CHAR* Path, OPENMODE OpenMode, ULONG* FileId)
         return EIO;
     }
 
-    /* Transform result to host endianness */
-    SectorCount = ntohl(ReadCapacityBuffer.LogicalBlockAddress);
+    /*
+     * Transform result to host endianness.
+     * READ CAPACITY returns the address of the LAST block, not the count.
+     */
+    SectorCount = (ULONGLONG)ntohl(ReadCapacityBuffer.LogicalBlockAddress) + 1;
     SectorSize = ntohl(ReadCapacityBuffer.BytesPerBlock);
 
     if (Partition != 0)
@@ -411,7 +414,8 @@ static ARC_STATUS DiskRead(ULONG FileId, VOID* Buffer, ULONG N, ULONG* Count)
 
     FullSectors = N / Context->SectorSize;
     NbSectors = (N + Context->SectorSize - 1) / Context->SectorSize;
-    if (Context->SectorNumber + NbSectors >= Context->SectorCount)
+    /* Reading up to and including the last sector is valid */
+    if (Context->SectorNumber + NbSectors > Context->SectorCount)
         return EINVAL;
     if (FullSectors > 0xffff)
         return EINVAL;
