@@ -1068,9 +1068,22 @@ HalpDispatchWmi(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp)
 {
-    UNIMPLEMENTED;
-    ASSERT(FALSE); // HalpDbgBreakPointEx();
-    return STATUS_NOT_IMPLEMENTED;
+    PFDO_EXTENSION FdoExtension;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    FdoExtension = DeviceObject->DeviceExtension;
+    DPRINT("HalpDispatchWmi: %p, %p, ExtType %X\n", DeviceObject, Irp, FdoExtension->ExtensionType);
+
+    /* The HAL is not a WMI provider: FDO passes the IRP down */
+    if (FdoExtension->ExtensionType == FdoExtensionType)
+        return HalpPassIrpFromFdoToPdo(DeviceObject, Irp);
+
+    /* PDO: complete the IRP without changing its status */
+    Status = Irp->IoStatus.Status;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
 }
 
 CODE_SEG("PAGELK")
@@ -1080,9 +1093,34 @@ HalpDispatchPower(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp)
 {
-    UNIMPLEMENTED;
-    ASSERT(FALSE); // HalpDbgBreakPointEx();
-    return STATUS_NOT_IMPLEMENTED;
+    PFDO_EXTENSION FdoExtension;
+    PIO_STACK_LOCATION IoStack;
+    NTSTATUS Status;
+
+    FdoExtension = DeviceObject->DeviceExtension;
+    IoStack = IoGetCurrentIrpStackLocation(Irp);
+    DPRINT("HalpDispatchPower: %p, Minor %X, ExtType %X\n", DeviceObject, IoStack->MinorFunction, FdoExtension->ExtensionType);
+
+    /* FDO: pass the IRP down to the PDO */
+    if (FdoExtension->ExtensionType == FdoExtensionType)
+    {
+        PoStartNextPowerIrp(Irp);
+        IoSkipCurrentIrpStackLocation(Irp);
+        return PoCallDriver(FdoExtension->AttachedDeviceObject, Irp);
+    }
+
+    /* PDO: HAL child devices have no power state of their own,
+       so set/query power succeed, other requests keep their status */
+    if (IoStack->MinorFunction == IRP_MN_SET_POWER ||
+        IoStack->MinorFunction == IRP_MN_QUERY_POWER)
+    {
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+    }
+
+    Status = Irp->IoStatus.Status;
+    PoStartNextPowerIrp(Irp);
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
 }
 
 CODE_SEG("PAGE")
