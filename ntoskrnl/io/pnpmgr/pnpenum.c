@@ -4998,8 +4998,40 @@ NTAPI
 PiProcessAddBootDevices(
     _In_ PPIP_ENUM_REQUEST Request)
 {
-    UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    /* Queued by PipAddDevicesToBootDriverWorker for every device instance
+       listed under Services\<Driver>\Enum of a boot driver that was
+       initialized after its devices had been enumerated. The PnP manager
+       must call the AddDevice routine of the drivers for that devnode now,
+       so the boot-start driver gets its device without waiting for a full
+       reenumeration (WRK: PiProcessAddBootDevices). Devnodes that already
+       passed AddDevice or have a problem are skipped. Driver images are not
+       loaded here: only drivers that are already in memory are attached.
+       The request's device object is dereferenced by PipEnumerationWorker. */
+    SERVICE_LOAD_TYPE DriverLoadType = BootLoad;
+    PDEVICE_NODE DeviceNode;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+    DPRINT("PiProcessAddBootDevices: Request %p\n", Request);
+
+    DeviceNode = IopGetDeviceNode(Request->DeviceObject);
+    if (!DeviceNode)
+        return STATUS_SUCCESS;
+
+    if (DeviceNode->State != DeviceNodeInitialized)
+        return STATUS_SUCCESS;
+
+    if (DeviceNode->Flags & (DNF_HAS_PROBLEM | DNF_HAS_PRIVATE_PROBLEM))
+        return STATUS_SUCCESS;
+
+    Status = PipCallDriverAddDevice(DeviceNode, FALSE, &DriverLoadType);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("PiProcessAddBootDevices: PipCallDriverAddDevice(%p) failed %X\n",
+                DeviceNode, Status);
+    }
+
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
