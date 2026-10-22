@@ -502,9 +502,10 @@ LoadWindowsCore(IN USHORT OperatingSystemVersion,
     CHAR HalFileName[MAX_PATH];
     CHAR KernelFileName[MAX_PATH];
     CHAR KdTransportDllName[MAX_PATH];
-    PLDR_DATA_TABLE_ENTRY HalDTE, KdComDTE = NULL;
+    PLDR_DATA_TABLE_ENTRY HalDTE = NULL, KdComDTE = NULL;
 
     if (!KernelDTE) return FALSE;
+    *KernelDTE = NULL;
 
     /* Initialize SystemRoot\System32 path */
     RtlStringCbCopyA(DirPath, sizeof(DirPath), BootPath);
@@ -563,11 +564,22 @@ LoadWindowsCore(IN USHORT OperatingSystemVersion,
 
     TRACE("HAL file = '%s' ; Kernel file = '%s'\n", HalFileName, KernelFileName);
 
-    /* Load the Kernel */
-    LoadModule(LoaderBlock, DirPath, KernelFileName, "ntoskrnl.exe", LoaderSystemCode, KernelDTE, 30);
+    /*
+     * Load the Kernel and the HAL. Their DTEs are used below to resolve
+     * imports, so a failed load must stop here instead of passing an
+     * uninitialized pointer to PeLdrScanImportDescriptorTable().
+     */
+    if (!LoadModule(LoaderBlock, DirPath, KernelFileName, "ntoskrnl.exe", LoaderSystemCode, KernelDTE, 30))
+    {
+        ERR("Failed to load kernel '%s%s'\n", DirPath, KernelFileName);
+        return FALSE;
+    }
 
-    /* Load the HAL */
-    LoadModule(LoaderBlock, DirPath, HalFileName, "hal.dll", LoaderHalCode, &HalDTE, 45);
+    if (!LoadModule(LoaderBlock, DirPath, HalFileName, "hal.dll", LoaderHalCode, &HalDTE, 45))
+    {
+        ERR("Failed to load HAL '%s%s'\n", DirPath, HalFileName);
+        return FALSE;
+    }
 
     /* Load the Kernel Debugger Transport DLL */
     if (OperatingSystemVersion > _WIN32_WINNT_WIN2K)
@@ -917,7 +929,7 @@ LoadAndBootWindows(
      * precedence over those passed via the separate "Hal=" and "Kernel="
      * options.
      */
-    if (strstr(BootOptions, "/HAL=") != 0)
+    if (strstr(BootOptions, "/HAL=") == NULL)
     {
         /*
          * Not found in the options, try to retrieve the
@@ -930,7 +942,7 @@ LoadAndBootWindows(
             RtlStringCbCatA(BootOptions, sizeof(BootOptions), ArgValue);
         }
     }
-    if (strstr(BootOptions, "/KERNEL=") != 0)
+    if (strstr(BootOptions, "/KERNEL=") == NULL)
     {
         /*
          * Not found in the options, try to retrieve the

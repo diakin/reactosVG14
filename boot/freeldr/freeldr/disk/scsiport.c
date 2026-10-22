@@ -88,6 +88,13 @@ typedef struct
 
     ULONG CommonBufferLength;
 
+    /* The only SRB that can be active (requests are synchronous) */
+    PSCSI_REQUEST_BLOCK CurrentSrb;
+
+    /* Pending ScsiPortNotification(RequestTimerCall) */
+    PHW_TIMER HwTimer;
+    ULONG HwTimerValue;
+
     PVOID MiniPortDeviceExtension;
 } SCSI_PORT_DEVICE_EXTENSION, *PSCSI_PORT_DEVICE_EXTENSION;
 
@@ -125,6 +132,31 @@ ntohl(
     return Dest.AsULong;
 }
 
+/*
+ * There are no interrupts in FreeLdr: poll the miniport interrupt routine,
+ * and run a timer routine requested with RequestTimerCall once its delay
+ * has elapsed.
+ */
+static
+VOID
+SpiPollMiniport(
+    IN PSCSI_PORT_DEVICE_EXTENSION DeviceExtension)
+{
+    PHW_TIMER HwTimer;
+
+    if (DeviceExtension->HwTimer)
+    {
+        HwTimer = DeviceExtension->HwTimer;
+        DeviceExtension->HwTimer = NULL;
+        KeStallExecutionProcessor(DeviceExtension->HwTimerValue);
+        HwTimer(DeviceExtension->MiniPortDeviceExtension);
+        return;
+    }
+
+    KeStallExecutionProcessor(100 * 1000);
+    DeviceExtension->HwInterrupt(DeviceExtension->MiniPortDeviceExtension);
+}
+
 static
 BOOLEAN
 SpiSendSynchronousSrb(
@@ -138,17 +170,33 @@ SpiSendSynchronousSrb(
     /* HACK: handle lack of interrupts */
     while (!(DeviceExtension->InterruptFlags & SCSI_PORT_NEXT_REQUEST_READY))
     {
-        KeStallExecutionProcessor(100 * 1000);
-        DeviceExtension->HwInterrupt(DeviceExtension->MiniPortDeviceExtension);
+        SpiPollMiniport(DeviceExtension);
     }
 
     DeviceExtension->InterruptFlags &= ~SCSI_PORT_NEXT_REQUEST_READY;
     Srb->SrbFlags |= SRB_FLAGS_IS_ACTIVE;
 
+    /*
+     * The miniport may have asked for a per-SRB extension
+     * (HW_INITIALIZATION_DATA::SrbExtensionSize). Only one SRB is active at
+     * a time here, so the single buffer at the start of the common buffer
+     * is enough. Without it, Srb->SrbExtension stays NULL and the miniport
+     * dereferences a NULL pointer in HwStartIo.
+     */
+    if (DeviceExtension->SrbExtensionSize != 0)
+    {
+        Srb->SrbExtension = DeviceExtension->SrbExtensionBuffer;
+        if (Srb->SrbExtension)
+            RtlZeroMemory(Srb->SrbExtension, DeviceExtension->SrbExtensionSize);
+    }
+
+    DeviceExtension->CurrentSrb = Srb;
+
     if (!DeviceExtension->HwStartIo(
             DeviceExtension->MiniPortDeviceExtension,
             Srb))
     {
+        DeviceExtension->CurrentSrb = NULL;
         ExFreePool(Srb);
         return FALSE;
     }
@@ -156,14 +204,58 @@ SpiSendSynchronousSrb(
     /* HACK: handle lack of interrupts */
     while (Srb->SrbFlags & SRB_FLAGS_IS_ACTIVE)
     {
-        KeStallExecutionProcessor(100 * 1000);
-        DeviceExtension->HwInterrupt(DeviceExtension->MiniPortDeviceExtension);
+        SpiPollMiniport(DeviceExtension);
     }
 
+    DeviceExtension->CurrentSrb = NULL;
     ret = SRB_STATUS(Srb->SrbStatus) == SRB_STATUS_SUCCESS;
     ExFreePool(Srb);
 
     return ret;
+}
+
+/* Read one sector with SCSI READ(10) into a caller-supplied buffer */
+static
+BOOLEAN
+SpiReadSector(
+    IN PSCSI_PORT_DEVICE_EXTENSION DeviceExtension,
+    IN UCHAR PathId,
+    IN UCHAR TargetId,
+    IN UCHAR Lun,
+    IN ULONG Lba,
+    IN ULONG SectorSize,
+    OUT PVOID Buffer)
+{
+    PSCSI_REQUEST_BLOCK Srb;
+    PCDB Cdb;
+
+    Srb = ExAllocatePool(PagedPool, sizeof(SCSI_REQUEST_BLOCK));
+    if (!Srb)
+        return FALSE;
+
+    RtlZeroMemory(Srb, sizeof(SCSI_REQUEST_BLOCK));
+    Srb->Length = sizeof(SCSI_REQUEST_BLOCK);
+    Srb->Function = SRB_FUNCTION_EXECUTE_SCSI;
+    Srb->PathId = PathId;
+    Srb->TargetId = TargetId;
+    Srb->Lun = Lun;
+    Srb->CdbLength = 10;
+    Srb->SrbFlags = SRB_FLAGS_DATA_IN;
+    Srb->DataTransferLength = SectorSize;
+    Srb->TimeOutValue = 5; /* in seconds */
+    Srb->DataBuffer = Buffer;
+    Cdb = (PCDB)Srb->Cdb;
+    Cdb->CDB10.OperationCode = SCSIOP_READ;
+    Cdb->CDB10.LogicalUnitNumber = Lun;
+    Cdb->CDB10.LogicalBlockByte0 = (Lba >> 24) & 0xff;
+    Cdb->CDB10.LogicalBlockByte1 = (Lba >> 16) & 0xff;
+    Cdb->CDB10.LogicalBlockByte2 = (Lba >> 8) & 0xff;
+    Cdb->CDB10.LogicalBlockByte3 = Lba & 0xff;
+    Cdb->CDB10.TransferBlocksMsb = 0;
+    Cdb->CDB10.TransferBlocksLsb = 1;
+
+    /* SpiSendSynchronousSrb frees the SRB */
+    return SpiSendSynchronousSrb(DeviceExtension, Srb);
 }
 
 static ARC_STATUS DiskClose(ULONG FileId)
@@ -235,15 +327,60 @@ static ARC_STATUS DiskOpen(CHAR* Path, OPENMODE OpenMode, ULONG* FileId)
         return EIO;
     }
 
-    /* Transform result to host endianness */
-    SectorCount = ntohl(ReadCapacityBuffer.LogicalBlockAddress);
+    /*
+     * Transform result to host endianness.
+     * READ CAPACITY returns the address of the LAST block, not the count.
+     */
+    SectorCount = (ULONGLONG)ntohl(ReadCapacityBuffer.LogicalBlockAddress) + 1;
     SectorSize = ntohl(ReadCapacityBuffer.BytesPerBlock);
 
     if (Partition != 0)
     {
-        /* Need to offset start of disk and length */
-        UNIMPLEMENTED;
-        return EIO;
+        /*
+         * Offset the start of the disk and the length to the partition.
+         * Partition numbers follow IoReadPartitionTable() in partition.c,
+         * as used by SpiScanDevice(): partition(N) is entry N of the MBR
+         * partition table. Logical drives inside an extended partition are
+         * not registered by SpiScanDevice(), so they are not handled here.
+         */
+        PMASTER_BOOT_RECORD Mbr;
+        PPARTITION_TABLE_ENTRY Entry;
+
+        if (Partition > RTL_NUMBER_OF(Mbr->PartitionTable) ||
+            SectorSize < sizeof(MASTER_BOOT_RECORD))
+        {
+            return EINVAL;
+        }
+
+        Mbr = ExAllocatePool(PagedPool, SectorSize);
+        if (!Mbr)
+            return ENOMEM;
+
+        if (!SpiReadSector(DeviceExtension, (UCHAR)PathId, (UCHAR)TargetId, (UCHAR)Lun,
+                           0, SectorSize, Mbr))
+        {
+            ExFreePool(Mbr);
+            return EIO;
+        }
+
+        if (Mbr->MasterBootRecordMagic != 0xAA55)
+        {
+            ExFreePool(Mbr);
+            return EINVAL;
+        }
+
+        Entry = &Mbr->PartitionTable[Partition - 1];
+        if (Entry->SystemIndicator == PARTITION_ENTRY_UNUSED ||
+            Entry->PartitionSectorCount == 0 ||
+            (ULONGLONG)Entry->SectorCountBeforePartition + Entry->PartitionSectorCount > SectorCount)
+        {
+            ExFreePool(Mbr);
+            return ENODEV;
+        }
+
+        SectorOffset = Entry->SectorCountBeforePartition;
+        SectorCount = Entry->PartitionSectorCount;
+        ExFreePool(Mbr);
     }
 
     Context = ExAllocatePool(PagedPool, sizeof(DISKCONTEXT));
@@ -277,7 +414,8 @@ static ARC_STATUS DiskRead(ULONG FileId, VOID* Buffer, ULONG N, ULONG* Count)
 
     FullSectors = N / Context->SectorSize;
     NbSectors = (N + Context->SectorSize - 1) / Context->SectorSize;
-    if (Context->SectorNumber + NbSectors >= Context->SectorCount)
+    /* Reading up to and including the last sector is valid */
+    if (Context->SectorNumber + NbSectors > Context->SectorCount)
         return EINVAL;
     if (FullSectors > 0xffff)
         return EINVAL;
@@ -443,6 +581,14 @@ SpiCreatePortConfig(
         ConfigInfo->TaggedQueuing = HwInitData->TaggedQueuing;
         ConfigInfo->MultipleRequestPerLu = HwInitData->MultipleRequestPerLu;
 
+        /*
+         * MSDN (PORT_CONFIGURATION_INFORMATION): SrbExtensionSize is set by the
+         * port driver from HW_INITIALIZATION_DATA and may be changed by the
+         * miniport in HwFindAdapter. It was left at 0, so the value given by
+         * the miniport in HW_INITIALIZATION_DATA was lost.
+         */
+        ConfigInfo->SrbExtensionSize = HwInitData->SrbExtensionSize;
+
         /* Get the disk usage */
         ConfigInfo->AtdiskPrimaryClaimed = FALSE; // FIXME
         ConfigInfo->AtdiskSecondaryClaimed = FALSE; // FIXME
@@ -502,8 +648,35 @@ ScsiPortCompleteRequest(
     IN UCHAR Lun,
     IN UCHAR SrbStatus)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /*
+     * MSDN: ScsiPortCompleteRequest completes all active requests for the
+     * given SCSI address with SrbStatus. SP_UNTAGGED (0xFF) in PathId,
+     * TargetId or Lun matches any value. Typically called after a bus reset.
+     *
+     * FreeLdr issues one synchronous SRB at a time, so only CurrentSrb
+     * can be outstanding.
+     */
+    PSCSI_PORT_DEVICE_EXTENSION DeviceExtension;
+    PSCSI_REQUEST_BLOCK Srb;
+
+    DeviceExtension = ((PSCSI_PORT_DEVICE_EXTENSION)HwDeviceExtension) - 1;
+    Srb = DeviceExtension->CurrentSrb;
+
+    if (Srb == NULL || !(Srb->SrbFlags & SRB_FLAGS_IS_ACTIVE))
+        return;
+
+    if ((PathId != SP_UNTAGGED && PathId != Srb->PathId) ||
+        (TargetId != SP_UNTAGGED && TargetId != Srb->TargetId) ||
+        (Lun != SP_UNTAGGED && Lun != Srb->Lun))
+    {
+        return;
+    }
+
+    TRACE("ScsiPortCompleteRequest(%u.%u.%u): status 0x%02x\n",
+          PathId, TargetId, Lun, SrbStatus);
+
+    Srb->SrbStatus = SrbStatus;
+    Srb->SrbFlags &= ~SRB_FLAGS_IS_ACTIVE;
 }
 
 #undef ScsiPortConvertPhysicalAddressToUlong
@@ -531,8 +704,15 @@ NTAPI
 ScsiPortFlushDma(
     IN PVOID DeviceExtension)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /*
+     * MSDN: ScsiPortFlushDma flushes any data left in the system DMA
+     * controller's buffers after a transfer set up by ScsiPortIoMapTransfer.
+     * If no system DMA transfer is pending, it does nothing.
+     *
+     * FreeLdr has no DMA adapter object (HalGetAdapter is not called), so
+     * ScsiPortIoMapTransfer never starts a transfer: nothing to flush.
+     */
+    TRACE("ScsiPortFlushDma(%p): no system DMA in FreeLdr\n", DeviceExtension);
 }
 
 VOID
@@ -584,9 +764,22 @@ ScsiPortGetDeviceBase(
     if (AddressSpace != 0)
         return (PVOID)TranslatedAddress.u.LowPart;
 
-    // FIXME
-    UNIMPLEMENTED;
-    return (PVOID)IoAddress.LowPart;
+    /*
+     * MSDN: ScsiPortGetDeviceBase maps a bus-relative memory range into
+     * system space and returns a base address the miniport passes to the
+     * ScsiPortRead/WriteRegisterXxx routines.
+     *
+     * FreeLdr runs with paging disabled, so the translated physical address
+     * can be used directly. Memory above 4 GB is not reachable that way.
+     */
+    if (TranslatedAddress.u.HighPart != 0)
+    {
+        ERR("ScsiPortGetDeviceBase: address 0x%I64x is above 4 GB\n",
+            TranslatedAddress.QuadPart);
+        return NULL;
+    }
+
+    return (PVOID)TranslatedAddress.u.LowPart;
 }
 
 PVOID
@@ -597,8 +790,17 @@ ScsiPortGetLogicalUnit(
     IN UCHAR TargetId,
     IN UCHAR Lun)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /*
+     * MSDN: ScsiPortGetLogicalUnit returns the miniport's per-LU storage
+     * (HW_INITIALIZATION_DATA::SpecificLuExtensionSize) for the given
+     * address, or NULL if no such logical unit exists or it has no extension.
+     *
+     * FreeLdr does not allocate logical unit extensions, so NULL is the
+     * documented "no extension" answer. Miniports that require one will
+     * not work with FreeLdr.
+     */
+    TRACE("ScsiPortGetLogicalUnit(%u.%u.%u): no LU extensions in FreeLdr\n",
+          PathId, TargetId, Lun);
     return NULL;
 }
 
@@ -620,13 +822,36 @@ ScsiPortGetPhysicalAddress(
 
     DeviceExtension = ((PSCSI_PORT_DEVICE_EXTENSION)HwDeviceExtension) - 1;
 
+    /*
+     * FreeLdr runs with paging disabled, so physical and virtual addresses
+     * are the same. The previous code returned the offset inside the common
+     * buffer instead of an address, so a bus-master miniport programmed its
+     * DMA engine with a low-memory address (0x0 + offset).
+     */
     if (Srb == NULL || Srb->SenseInfoBuffer == VirtualAddress)
     {
         /* Simply look it up in the allocated common buffer */
         Offset = (PUCHAR)VirtualAddress - (PUCHAR)DeviceExtension->SrbExtensionBuffer;
 
-        BufferLength = DeviceExtension->CommonBufferLength - Offset;
-        PhysicalAddress.QuadPart = Offset;
+        if (DeviceExtension->SrbExtensionBuffer != NULL &&
+            Offset < DeviceExtension->CommonBufferLength)
+        {
+            BufferLength = DeviceExtension->CommonBufferLength - Offset;
+        }
+        else
+        {
+            /* Not in the common buffer (e.g. a sense buffer): one-page contiguous chunk */
+            BufferLength = PAGE_SIZE - ((ULONG_PTR)VirtualAddress & (PAGE_SIZE - 1));
+        }
+        PhysicalAddress.QuadPart = (ULONG_PTR)VirtualAddress;
+    }
+    else if ((PUCHAR)VirtualAddress >= (PUCHAR)Srb->DataBuffer &&
+             (PUCHAR)VirtualAddress < (PUCHAR)Srb->DataBuffer + Srb->DataTransferLength)
+    {
+        /* Data buffer of the SRB: physically contiguous because paging is off */
+        Offset = (PUCHAR)VirtualAddress - (PUCHAR)Srb->DataBuffer;
+        BufferLength = Srb->DataTransferLength - Offset;
+        PhysicalAddress.QuadPart = (ULONG_PTR)VirtualAddress;
     }
     else
     {
@@ -647,9 +872,29 @@ ScsiPortGetSrb(
     IN UCHAR Lun,
     IN LONG QueueTag)
 {
-    // FIXME
-    UNIMPLEMENTED;
-    return NULL;
+    /*
+     * MSDN: ScsiPortGetSrb returns the SRB for the given SCSI address and
+     * queue tag (SP_UNTAGGED for untagged requests), or NULL if there is
+     * no such outstanding request.
+     *
+     * FreeLdr issues untagged requests, one at a time.
+     */
+    PSCSI_PORT_DEVICE_EXTENSION PortExtension;
+    PSCSI_REQUEST_BLOCK Srb;
+
+    PortExtension = ((PSCSI_PORT_DEVICE_EXTENSION)DeviceExtension) - 1;
+    Srb = PortExtension->CurrentSrb;
+
+    if (Srb == NULL || !(Srb->SrbFlags & SRB_FLAGS_IS_ACTIVE))
+        return NULL;
+
+    if (Srb->PathId != PathId || Srb->TargetId != TargetId || Srb->Lun != Lun)
+        return NULL;
+
+    if (QueueTag != SP_UNTAGGED && QueueTag != Srb->QueueTag)
+        return NULL;
+
+    return Srb;
 }
 
 static
@@ -671,22 +916,26 @@ SpiAllocateCommonBuffer(
     /* Round it */
     BufSize = (BufSize + sizeof(LONGLONG) - 1) & ~(sizeof(LONGLONG) - 1);
 
-    /* Sum up into the total common buffer length, and round it to page size */
+    /*
+     * Sum up into the total common buffer length, and round it to page size.
+     * The SRB extension lives at the start of the buffer and the uncached
+     * extension at its end, so both sizes must be counted; otherwise the two
+     * overlap when NonCachedSize is a multiple of PAGE_SIZE.
+     */
     CommonBufferLength =
-        ROUND_TO_PAGES(NonCachedSize);
+        ROUND_TO_PAGES(NonCachedSize + BufSize);
 
-    /* Allocate it */
-    if (!DeviceExtension->AdapterObject)
+    /*
+     * Allocate it. The kernel scsiport uses HalAllocateCommonBuffer when it
+     * has a DMA adapter object; FreeLdr never creates one (HalGetAdapter is
+     * disabled in ScsiPortGetUncachedExtension) and runs with paging off, so
+     * pool memory is already physically contiguous and below 4 GB.
+     */
+    if (DeviceExtension->AdapterObject)
     {
-        /* From nonpaged pool if there is no DMA */
-        CommonBuffer = ExAllocatePool(NonPagedPool, CommonBufferLength);
+        WARN("SpiAllocateCommonBuffer: DMA adapter object is not supported, using pool memory\n");
     }
-    else
-    {
-        /* Perform a full request since we have a DMA adapter*/
-        UNIMPLEMENTED;
-        CommonBuffer = NULL;
-    }
+    CommonBuffer = ExAllocatePool(NonPagedPool, CommonBufferLength);
 
     /* Fail in case of error */
     if (!CommonBuffer)
@@ -807,9 +1056,30 @@ ScsiPortGetVirtualAddress(
     IN PVOID HwDeviceExtension,
     IN SCSI_PHYSICAL_ADDRESS PhysicalAddress)
 {
-    // FIXME
-    UNIMPLEMENTED;
-    return NULL;
+    /*
+     * MSDN: ScsiPortGetVirtualAddress returns the virtual address for a
+     * physical address obtained with ScsiPortGetPhysicalAddress for the
+     * uncached extension or SRB extension (the common buffer). It returns
+     * NULL if the address is not inside that range.
+     *
+     * Paging is off in FreeLdr, so the mapping is the identity.
+     */
+    PSCSI_PORT_DEVICE_EXTENSION DeviceExtension;
+    ULONG_PTR BufferStart;
+
+    DeviceExtension = ((PSCSI_PORT_DEVICE_EXTENSION)HwDeviceExtension) - 1;
+    BufferStart = (ULONG_PTR)DeviceExtension->SrbExtensionBuffer;
+
+    if (BufferStart == 0 || PhysicalAddress.HighPart != 0)
+        return NULL;
+
+    if (PhysicalAddress.LowPart < BufferStart ||
+        PhysicalAddress.LowPart >= BufferStart + DeviceExtension->CommonBufferLength)
+    {
+        return NULL;
+    }
+
+    return (PVOID)PhysicalAddress.LowPart;
 }
 
 static
@@ -1239,6 +1509,19 @@ ScsiPortInitialize(
 
         DeviceExtension->BusNum = PortConfig.SystemIoBusNumber;
 
+        /* Allocate the SRB extension if the miniport needs one and has no common buffer yet */
+        if (DeviceExtension->SrbExtensionBuffer == NULL &&
+            (HwInitializationData->SrbExtensionSize != 0 || PortConfig.SrbExtensionSize != 0))
+        {
+            DeviceExtension->SrbExtensionSize = max(HwInitializationData->SrbExtensionSize,
+                                                    PortConfig.SrbExtensionSize);
+            if (!NT_SUCCESS(SpiAllocateCommonBuffer(DeviceExtension, 0)))
+            {
+                FrLdrTempFree(DeviceExtension, TAG_SCSI_DEVEXT);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+        }
+
         TRACE("Adapter found: buses = %d, targets = %d\n",
                  PortConfig.NumberOfBuses, DeviceExtension->MaxTargedIds);
 
@@ -1274,8 +1557,17 @@ ScsiPortIoMapTransfer(
     IN PVOID LogicalAddress,
     IN ULONG Length)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /*
+     * MSDN: ScsiPortIoMapTransfer sets up the system (slave) DMA controller
+     * for a data transfer of an SRB; used by miniports for ISA-type DMA
+     * devices. The port driver calls HwScsiDmaStarted when the controller
+     * is programmed.
+     *
+     * FreeLdr has no DMA adapter object, so the transfer cannot be set up.
+     * Report it; the request will time out in the miniport.
+     */
+    ERR("ScsiPortIoMapTransfer(%p, %p, %p, %lu): system DMA is not supported in FreeLdr\n",
+        HwDeviceExtension, Srb, LogicalAddress, Length);
 }
 
 VOID
@@ -1289,8 +1581,15 @@ ScsiPortLogError(
     IN ULONG ErrorCode,
     IN ULONG UniqueId)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /*
+     * MSDN: ScsiPortLogError allocates an error log packet and writes it to
+     * the system event log: ErrorCode (SP_BUS_PARITY_ERROR, SP_BAD_FW_ERROR,
+     * ...), UniqueId and the SCSI address of the failing target.
+     *
+     * There is no event log in FreeLdr; print it to the debug output.
+     */
+    ERR("ScsiPortLogError: %u.%u.%u Srb %p ErrorCode 0x%lx UniqueId 0x%lx\n",
+        PathId, TargetId, Lun, Srb, ErrorCode, UniqueId);
 }
 
 VOID
@@ -1331,9 +1630,61 @@ ScsiPortNotification(
             DeviceExtension->InterruptFlags |= SCSI_PORT_NEXT_REQUEST_READY;
             break;
 
+        case NextLuRequest:
+            /*
+             * MSDN: the miniport is ready for another request for this LU
+             * (and for the adapter). Requests are not queued per LU here,
+             * so treat it as NextRequest.
+             */
+            DeviceExtension->InterruptFlags |= SCSI_PORT_NEXT_REQUEST_READY;
+            break;
+
+        case ResetDetected:
+            /* MSDN: a bus reset was detected; the port driver starts its reset hold period */
+            TRACE("ScsiPortNotification: ResetDetected\n");
+            break;
+
+        case CallDisableInterrupts:
+        case CallEnableInterrupts:
+        {
+            /*
+             * MSDN: the port driver calls the given routine with interrupts
+             * of the adapter disabled (CallDisableInterrupts) or re-enabled
+             * (CallEnableInterrupts). FreeLdr does not use interrupts, so
+             * the routine can be called at once.
+             */
+            PHW_INTERRUPT Routine = va_arg(ap, PHW_INTERRUPT);
+            if (Routine)
+                Routine(HwDeviceExtension);
+            break;
+        }
+
+        case RequestTimerCall:
+        {
+            /*
+             * MSDN: call HwScsiTimer after MiniportTimerValue microseconds;
+             * a value of 0 cancels the pending request. The call is made from
+             * the polling loop (SpiPollMiniport), not from here, to avoid
+             * re-entering the miniport.
+             */
+            PHW_TIMER HwTimer = va_arg(ap, PHW_TIMER);
+            ULONG TimerValue = va_arg(ap, ULONG);
+
+            DeviceExtension->HwTimer = (TimerValue != 0) ? HwTimer : NULL;
+            DeviceExtension->HwTimerValue = TimerValue;
+            break;
+        }
+
+        case BusChangeDetected:
+        case WMIEvent:
+        case WMIReregister:
+            /* Device rescans and WMI are not used in FreeLdr */
+            TRACE("ScsiPortNotification: type %d ignored\n", NotificationType);
+            break;
+
         default:
-            // FIXME
-            UNIMPLEMENTED;
+            WARN("ScsiPortNotification: unsupported notification type %d\n", NotificationType);
+            break;
     }
 
     va_end(ap);
@@ -1402,8 +1753,14 @@ ScsiPortReadRegisterBufferUchar(
     IN PUCHAR Buffer,
     IN ULONG Count)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /*
+     * MSDN: reads Count bytes from the same memory-mapped register
+     * into Buffer (the register address is not incremented).
+     */
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+        Buffer[Index] = READ_REGISTER_UCHAR(Register);
 }
 
 VOID
@@ -1413,8 +1770,11 @@ ScsiPortReadRegisterBufferUlong(
     IN PULONG Buffer,
     IN ULONG Count)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /* MSDN: reads Count ULONG values from the same memory-mapped register into Buffer */
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+        Buffer[Index] = READ_REGISTER_ULONG(Register);
 }
 
 VOID
@@ -1424,8 +1784,11 @@ ScsiPortReadRegisterBufferUshort(
     IN PUSHORT Buffer,
     IN ULONG Count)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /* MSDN: reads Count USHORT values from the same memory-mapped register into Buffer */
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+        Buffer[Index] = READ_REGISTER_USHORT(Register);
 }
 
 UCHAR
@@ -1463,9 +1826,13 @@ ScsiPortSetBusDataByOffset(
     IN ULONG Offset,
     IN ULONG Length)
 {
-    // FIXME
-    UNIMPLEMENTED;
-    return 0;
+    /*
+     * MSDN: ScsiPortSetBusDataByOffset writes Length bytes of bus-specific
+     * configuration data (for PCI: configuration space) at Offset and
+     * returns the number of bytes written, or 0 if the slot is invalid.
+     * It is a wrapper around HalSetBusDataByOffset.
+     */
+    return HalSetBusDataByOffset(BusDataType, SystemIoBusNumber, SlotNumber, Buffer, Offset, Length);
 }
 
 VOID
@@ -1486,8 +1853,15 @@ ScsiPortValidateRange(
     IN ULONG NumberOfBytes,
     IN BOOLEAN InIoSpace)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /*
+     * MSDN: ScsiPortValidateRange returns TRUE if the given I/O or memory
+     * range is not already claimed by another driver in the registry, so a
+     * legacy miniport may probe it in HwFindAdapter.
+     *
+     * FreeLdr keeps no resource map; every range is free from its view.
+     */
+    TRACE("ScsiPortValidateRange(0x%I64x, %lu, %s): no resource map, TRUE\n",
+          IoAddress.QuadPart, NumberOfBytes, InIoSpace ? "I/O" : "memory");
     return TRUE;
 }
 
@@ -1560,8 +1934,11 @@ ScsiPortWriteRegisterBufferUchar(
     IN PUCHAR Buffer,
     IN ULONG Count)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /* MSDN: writes Count bytes from Buffer to the same memory-mapped register */
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+        WRITE_REGISTER_UCHAR(Register, Buffer[Index]);
 }
 
 VOID
@@ -1571,8 +1948,11 @@ ScsiPortWriteRegisterBufferUlong(
     IN PULONG Buffer,
     IN ULONG Count)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /* MSDN: writes Count ULONG values from Buffer to the same memory-mapped register */
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+        WRITE_REGISTER_ULONG(Register, Buffer[Index]);
 }
 
 VOID
@@ -1582,8 +1962,11 @@ ScsiPortWriteRegisterBufferUshort(
     IN PUSHORT Buffer,
     IN ULONG Count)
 {
-    // FIXME
-    UNIMPLEMENTED;
+    /* MSDN: writes Count USHORT values from Buffer to the same memory-mapped register */
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+        WRITE_REGISTER_USHORT(Register, Buffer[Index]);
 }
 
 VOID
