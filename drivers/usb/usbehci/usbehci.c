@@ -1148,13 +1148,20 @@ EHCI_TakeControlHC(IN PEHCI_EXTENSION EhciExtension)
                                               sizeof(LegacySupport.LegacyCapability));
         KeQuerySystemTime(&CurrentTime);
 
-        if (LegacySupport.LegacyCapability.BiosOwnedSemaphore)
+        /* EHCI 1.0 spec, 5.1: the BIOS releases the controller by clearing
+           HC BIOS Owned Semaphore after the OS sets HC OS Owned Semaphore */
+        if (!LegacySupport.LegacyCapability.BiosOwnedSemaphore)
         {
             DPRINT_EHCI("EHCI_TakeControlHC: Ownership is ok\n");
             break;
         }
     }
     while (CurrentTime.QuadPart <= EndTime.QuadPart);
+
+    if (LegacySupport.LegacyCapability.BiosOwnedSemaphore)
+    {
+        DPRINT1("EHCI_TakeControlHC: BIOS did not release the controller\n");
+    }
 
     return MP_STATUS_SUCCESS;
 }
