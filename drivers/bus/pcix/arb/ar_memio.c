@@ -827,7 +827,7 @@ ario_BacktrackAllocation(
     ario_AddOrBacktrackAllocation(Arbiter, ArbState, ArbBacktrackAllocation);
 }
 
-NTSTATUS
+BOOLEAN
 NTAPI
 ario_OverrideConflict(
     _In_ PARBITER_INSTANCE Arbiter,

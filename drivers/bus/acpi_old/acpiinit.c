@@ -4604,14 +4604,14 @@ AcpiArbPreprocessEntry(
     return STATUS_SUCCESS;
 }
 
-NTSTATUS
+BOOLEAN
 NTAPI
 AcpiArbOverrideConflict(
     _In_ PARBITER_INSTANCE Arbiter,
     _Inout_ PARBITER_ALLOCATION_STATE ArbState)
 {
     UNIMPLEMENTED_DBGBREAK();
-    return STATUS_NOT_IMPLEMENTED;
+    return FALSE;
 }
 
 NTSTATUS

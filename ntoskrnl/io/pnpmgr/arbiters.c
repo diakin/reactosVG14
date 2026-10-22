@@ -370,7 +370,7 @@ IopDmaScoreRequirement(
     return 0;
 }
 
-NTSTATUS
+BOOLEAN
 NTAPI
 IopDmaOverrideConflict(
     _In_ PARBITER_INSTANCE Arbiter,
@@ -378,8 +378,8 @@ IopDmaOverrideConflict(
 {
     PAGED_CODE();
 
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    /* DMA channels are not shared: the conflict is not overridden */
+    return FALSE;
 }
 
 NTSTATUS
