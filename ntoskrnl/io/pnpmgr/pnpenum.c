@@ -4716,7 +4716,7 @@ restartENUMERATION:
             ReenumAttempts++;
             DPRINT("PipProcessDevNodeTree: ReenumAttempts %X\n", ReenumAttempts);
 
-            if (ReenumAttempts >= STATUS_UNSUCCESSFUL)
+            if (ReenumAttempts >= MAX_REENUMERATION_ATTEMPTS)
             {
                 RootInstancePath = NULL;
                 Instance = NULL;
@@ -4730,6 +4730,7 @@ restartENUMERATION:
                     ASSERT(StartNode->InstancePath.Length < MAX_INSTANCE_PATH_LENGTH);
 
                     RtlCopyMemory(Buffer, StartNode->InstancePath.Buffer, *pLength);
+                    Buffer[*pLength / sizeof(WCHAR)] = UNICODE_NULL;
 
                     RootInstancePath = Buffer;
                 }
@@ -4761,10 +4762,9 @@ restartENUMERATION:
             PpDevNodeLockTree(1);
             DPRINT("PipProcessDevNodeTree: ReenumAttempts %X\n", ReenumAttempts);
 
-            if (ReenumAttempts >= STATUS_UNSUCCESSFUL)
+            if (ReenumAttempts >= MAX_REENUMERATION_ATTEMPTS)
             {
-                DPRINT("PipProcessDevNodeTree: Restarted reenumeration %d times, giving up!\n", ReenumAttempts);
-                ASSERT(ReenumAttempts < MAX_REENUMERATION_ATTEMPTS);
+                DPRINT1("PipProcessDevNodeTree: Restarted reenumeration %d times, giving up!\n", ReenumAttempts);
                 return STATUS_UNSUCCESSFUL;
             }
 
@@ -5474,15 +5474,15 @@ Start:
 
                 case PipEnumBootDevices:
                     DPRINT("PipEnumerationWorker: PipEnumBootDevices\n");
+                    /* The tree is processed after this request is completed */
                     IsBootProcess = TRUE;
-                    Request = NULL;
-                    goto Start;
+                    break;
 
                 case PipEnumAssignResources:
                     DPRINT("PipEnumerationWorker: PipEnumAssignResources\n");
+                    /* The tree is processed after this request is completed */
                     IsAssignResources = TRUE;
-                    Request = NULL;
-                    goto Start;
+                    break;
 
                 case PipEnumGetSetDeviceStatus:
                     DPRINT1("PipEnumerationWorker: PipEnumGetSetDeviceStatus\n");
@@ -5528,8 +5528,6 @@ RestartDevice:
                         ASSERT(FALSE);
                         IsAssignResources = TRUE;
                         Status = STATUS_SUCCESS;
-                        Request = NULL;
-                        goto Start;
                     }
                     break;
 
@@ -5567,6 +5565,14 @@ NextRequest:
                 ObDereferenceObject(Request->DeviceObject);
 
             ExFreePoolWithTag(Request, TAG_IO);
+
+            /* PipEnumBootDevices and PipEnumAssignResources: the request is
+               completed above (status, event, reference, memory), now process the tree */
+            if (IsAssignResources || IsBootProcess)
+            {
+                Request = NULL;
+                goto Start;
+            }
         }
         else if (IsAssignResources || IsBootProcess)
         {
