@@ -492,7 +492,11 @@ IoInitSystem(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     /* Load boot start drivers */
     DPRINT("IoInitSystem: IopInitializeBootDrivers()\n");
-    IopInitializeBootDrivers(LoaderBlock);
+    if (!IopInitializeBootDrivers(LoaderBlock))
+    {
+        DPRINT1("IoInitSystem: IopInitializeBootDrivers failed\n");
+        return FALSE;
+    }
 
     /* No one should need loader block any longer */
     IopLoaderBlock = NULL;

@@ -1067,16 +1067,54 @@ ArbBacktrackAllocation(
     DPRINT("ArbBacktrackAllocation: %I64X-%I64X for %p\n", ArbState->Start, ArbState->End, ArbState->Entry->PhysicalDeviceObject);
 }
 
-NTSTATUS
+/* Returns TRUE if the conflict can be ignored: the alternative is fixed
+   (ARBITER_ALTERNATIVE_FLAG_FIXED) and every conflicting range belongs to the
+   same device (self-conflicting requirement). Otherwise returns FALSE. */
+BOOLEAN
 NTAPI
 ArbOverrideConflict(
     _In_ PARBITER_INSTANCE Arbiter,
     _Inout_ PARBITER_ALLOCATION_STATE ArbState)
 {
+    RTL_RANGE_LIST_ITERATOR Iterator;
+    PRTL_RANGE Range;
+    BOOLEAN Result = FALSE;
+
     PAGED_CODE();
 
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    if (!(ArbState->CurrentAlternative->Flags & 2)) // ARBITER_ALTERNATIVE_FLAG_FIXED
+        return FALSE;
+
+    for (RtlGetFirstRange(Arbiter->PossibleAllocation, &Iterator, &Range);
+         Range;
+         RtlGetNextRange(&Iterator, &Range, TRUE))
+    {
+        /* Skip ranges that do not intersect the requested one */
+        if (Range->End < ArbState->CurrentMinimum ||
+            Range->Start > ArbState->CurrentMaximum)
+        {
+            continue;
+        }
+
+        if (Range->Attributes & ArbState->RangeAvailableAttributes)
+            continue;
+
+        if (Range->Owner == ArbState->Entry->PhysicalDeviceObject)
+        {
+            DPRINT1("ArbOverrideConflict: Device reported self-conflicting requirement\n");
+
+            ArbState->Start = ArbState->CurrentMinimum;
+            ArbState->End = ArbState->CurrentMaximum;
+
+            Result = TRUE;
+            continue;
+        }
+
+        /* Conflict with another device */
+        return FALSE;
+    }
+
+    return Result;
 }
 
 NTSTATUS
