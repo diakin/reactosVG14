@@ -1878,7 +1878,7 @@ IopDeleteLegacyKey(
     ServiceKeyName = &DriverObject->DriverExtension->ServiceKeyName;
 
     KeEnterCriticalRegion();
-    ExAcquireResourceSharedLite(&PpRegistryDeviceResource, TRUE);
+    ExAcquireResourceExclusiveLite(&PpRegistryDeviceResource, TRUE);
 
     Status = IopOpenRegistryKeyEx(&EnumHandle, NULL, &EnumKeyName, KEY_ALL_ACCESS);
     if (!NT_SUCCESS(Status))
@@ -2175,7 +2175,7 @@ IopDriverLoadingFailed(
             }
 
             KeEnterCriticalRegion();
-            ExAcquireResourceSharedLite(&PpRegistryDeviceResource, TRUE);
+            ExAcquireResourceExclusiveLite(&PpRegistryDeviceResource, TRUE);
 
             ControlKeyHandle = NULL;
             Status = IopOpenRegistryKeyEx(&ControlKeyHandle, InstanceKeyHandle, &ControlName, KEY_ALL_ACCESS);
